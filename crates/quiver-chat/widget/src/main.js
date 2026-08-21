@@ -130,6 +130,11 @@ function handle(wire) {
       // Channel swapped: history wiped server-side.
       chat.replaceChildren();
       break;
+    case "reload":
+      // Frontend files changed on disk. Guard against rapid loops: a page
+      // that just booted ignores reload frames for a moment.
+      if (Date.now() - bootMs > 1500) location.reload();
+      break;
   }
 }
 
@@ -150,5 +155,6 @@ function connect() {
   };
 }
 
+const bootMs = Date.now();
 const chat = document.getElementById("chat");
 connect();

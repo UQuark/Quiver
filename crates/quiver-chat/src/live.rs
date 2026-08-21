@@ -45,6 +45,8 @@ pub enum Action {
     SetMax(u32),
     /// Join a different Twitch channel (old one parted, history cleared).
     SwapChannel(String),
+    /// Widget frontend directory changed — re-target the file watcher.
+    SetWidgetDist(Option<PathBuf>),
     /// Credentials changed — refetch the badge URL map.
     RefreshBadges,
     /// Push fresh meta (theme/badges/custom_css) to connected clients.
@@ -55,14 +57,17 @@ pub enum Action {
 
 /// Pure diff between two live views → ordered action list.
 ///
-/// Canonical order (tested): SetMax → SwapChannel → RefreshBadges →
-/// BroadcastMeta → Rebind. Rebind runs last so everything else settles
-/// before the listener moves.
+/// Canonical order (tested): SetMax → SetWidgetDist → SwapChannel →
+/// RefreshBadges → BroadcastMeta → Rebind. Rebind runs last so everything
+/// else settles before the listener moves.
 pub fn planned_actions(old: &LiveConfig, new: &LiveConfig) -> Vec<Action> {
     let mut out = Vec::new();
 
     if old.theme.max_messages != new.theme.max_messages {
         out.push(Action::SetMax(new.theme.max_messages));
+    }
+    if old.widget_dist != new.widget_dist {
+        out.push(Action::SetWidgetDist(new.widget_dist.clone()));
     }
     if old.channel != new.channel {
         out.push(Action::SwapChannel(new.channel.clone()));
@@ -162,11 +167,20 @@ mod tests {
     }
 
     #[test]
-    fn widget_dist_change_needs_no_runtime_action() {
-        // resolved per-request from live state
+    fn widget_dist_change_retargets_watcher() {
         let a = live("a:1", None, "chan", Some("id"), 18, 30, 60);
         let b = live("a:1", Some("/tmp/x"), "chan", Some("id"), 18, 30, 60);
-        assert_eq!(planned_actions(&a, &b), Vec::new());
+        assert_eq!(
+            planned_actions(&a, &b),
+            vec![Action::SetWidgetDist(Some(PathBuf::from("/tmp/x")))]
+        );
+    }
+
+    #[test]
+    fn widget_dist_removal_retargets_to_none() {
+        let a = live("a:1", Some("/tmp/x"), "chan", Some("id"), 18, 30, 60);
+        let b = live("a:1", None, "chan", Some("id"), 18, 30, 60);
+        assert_eq!(planned_actions(&a, &b), vec![Action::SetWidgetDist(None)]);
     }
 
     #[test]
@@ -185,6 +199,7 @@ mod tests {
             planned_actions(&a, &b),
             vec![
                 Action::SetMax(40),
+                Action::SetWidgetDist(Some(PathBuf::from("/x"))),
                 Action::SwapChannel("two".to_string()),
                 Action::RefreshBadges,
                 Action::BroadcastMeta,

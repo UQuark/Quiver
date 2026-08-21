@@ -109,7 +109,10 @@ half-applied state. Applied effects per field:
 - message_lifetime_secs → picked up by the sweep on its next tick
 - twitch.channel → live part/join on the same connection; history cleared
 - credentials → badge map refetch
-- server.widget_dist → resolved per request from disk
+- server.widget_dist → resolved per request from disk; the frontend
+  watcher re-targets and connected pages get a `{type:"reload"}` frame
+  (rate-limited to one per second) so they refresh themselves — frontend
+  hot reload for free, no build step involved
 - server.listen → HTTP listener rebinds live; WebSocket handlers are freed
   via a generation token and pages auto-reconnect (a page pointed at the
   old port cannot follow — repoint the OBS source URL once)

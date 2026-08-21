@@ -4,6 +4,7 @@
 //! or an invalid channel login REJECT the whole reload — the running
 //! config stays untouched. There is no half-applied state, ever.
 
+use notify::Watcher as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -26,6 +27,7 @@ pub(crate) struct ReloadCtx {
     pub tx: tokio::sync::broadcast::Sender<String>,
     pub badges: SharedBadges,
     pub feed_swap: mpsc::UnboundedSender<String>,
+    pub fe_watch: mpsc::UnboundedSender<Option<PathBuf>>,
     pub rebind: Arc<Notify>,
 }
 
@@ -184,6 +186,108 @@ fn twitch_irc_validate_channel(login: &str) -> Result<(), String> {
     quiver_twitch::IrcChatSource::validate_channel_login(login).map_err(|e| e.to_string())
 }
 
+/// Frontend-watcher bridge: re-target the watched directory.
+enum BridgeMsg {
+    SetDir(Option<PathBuf>),
+}
+
+/// Watch the widget frontend directory; any change broadcasts ONE
+/// coalesced `{type:"reload"}` frame per interval so connected pages
+/// refresh themselves. Re-targetable at runtime via control messages
+/// (config hot reload may move `server.widget_dist`).
+pub(crate) fn spawn_frontend_watcher(
+    initial_dir: Option<PathBuf>,
+    mut ctrl_rx: mpsc::UnboundedReceiver<Option<PathBuf>>,
+    tx: tokio::sync::broadcast::Sender<String>,
+) {
+    const MIN_INTERVAL: Duration = Duration::from_secs(1);
+
+    // Trigger channel from the bridge thread into async-land.
+    let (trig_tx, mut trig_rx) = mpsc::unbounded_channel::<()>();
+    let (bridge_tx, bridge_rx) = std::sync::mpsc::channel::<BridgeMsg>();
+
+    // Std thread owns the PollWatchers for the CURRENT dir. Watchers are
+    // dropped (and stop watching) whenever the target changes.
+    //
+    // Raw PollWatcher, no debouncer layer: polling coalesces naturally and
+    // the async side rate-limits frames; Debouncer(PollWatcher)+cache proved
+    // unreliable on macOS while raw PollWatcher+Recursive works.
+    {
+        let trig_tx = trig_tx.clone();
+        std::thread::spawn(move || {
+            // Alive == watching. Underscore: never read, lifetime matters.
+            let mut _watchers: Vec<notify::PollWatcher> = Vec::new();
+            loop {
+                match bridge_rx.recv() {
+                    Ok(BridgeMsg::SetDir(dir)) => {
+                        _watchers.clear();
+                        let Some(d) = dir.filter(|d| d.is_dir()) else {
+                            continue;
+                        };
+                        let tx2 = trig_tx.clone();
+                        // Deterministic sub-second latency beats battery here:
+                        // the dir is a handful of files and devs want instant
+                        // reloads. FSEvents latency measured at 3-7s on this box.
+                        let cfg = notify::Config::default()
+                            .with_poll_interval(Duration::from_millis(300));
+                        match notify::PollWatcher::new(
+                            move |res: std::result::Result<notify::Event, notify::Error>| {
+                                if res.is_ok() {
+                                    let _ = tx2.send(());
+                                }
+                            },
+                            cfg,
+                        ) {
+                            Ok(mut w) => match w.watch(&d, notify::RecursiveMode::Recursive) {
+                                Ok(()) => {
+                                    debug!(dir = %d.display(), "watching widget frontend");
+                                    _watchers.push(w);
+                                }
+                                Err(e) => {
+                                    warn!(dir = %d.display(), error = %e, "cannot watch widget dir")
+                                }
+                            },
+                            Err(e) => warn!(error = %e, "frontend watcher unavailable"),
+                        }
+                    }
+                    Err(_) => return, // controller dropped: shutdown
+                }
+            }
+        });
+    }
+
+    tokio::spawn(async move {
+        // Initial target.
+        let _ = bridge_tx.send(BridgeMsg::SetDir(initial_dir));
+
+        // Coalescing loop: at most one reload frame per MIN_INTERVAL.
+        let mut last_sent: Option<tokio::time::Instant> = None;
+        loop {
+            tokio::select! {
+                msg = ctrl_rx.recv() => {
+                    // None = all senders dropped (shutdown).
+                    match msg {
+                        Some(dir) => { let _ = bridge_tx.send(BridgeMsg::SetDir(dir)); }
+                        None => return,
+                    }
+                }
+                _ = trig_rx.recv() => {
+                    let now = tokio::time::Instant::now();
+                    let due = match last_sent {
+                        None => true,
+                        Some(t) => now.duration_since(t) >= MIN_INTERVAL,
+                    };
+                    if due {
+                        last_sent = Some(now);
+                        info!("widget frontend changed — reloading connected pages");
+                        let _ = tx.send(r#"{"type":"reload"}"#.to_string());
+                    }
+                }
+            }
+        }
+    });
+}
+
 async fn apply_action(ctx: &ReloadCtx, action: &Action, new_live: &LiveConfig) {
     match action {
         Action::SetMax(n) => {
@@ -196,6 +300,10 @@ async fn apply_action(ctx: &ReloadCtx, action: &Action, new_live: &LiveConfig) {
                 let frame = serde_json::json!({ "type": "expire", "ids": evicted });
                 let _ = ctx.tx.send(frame.to_string());
             }
+        }
+        Action::SetWidgetDist(dir) => {
+            // Re-target the frontend watcher; None disables it.
+            let _ = ctx.fe_watch.send(dir.clone());
         }
         Action::SwapChannel(channel) => {
             // Supervisor parts/joins and broadcasts {"type":"clear"}.

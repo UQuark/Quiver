@@ -92,12 +92,21 @@ pub async fn run(cfg: ChatConfig, config_path: PathBuf) -> anyhow::Result<()> {
 
     let feed = spawn_feed(live.clone(), messages.clone(), tx.clone());
 
+    // Frontend hot reload: watch the widget dir, push {type:reload} frames.
+    let (fe_watch_tx, fe_watch_rx) = tokio::sync::mpsc::unbounded_channel::<Option<PathBuf>>();
+    crate::reload::spawn_frontend_watcher(
+        live.read().unwrap().widget_dist.clone(),
+        fe_watch_rx,
+        tx.clone(),
+    );
+
     let ctx = crate::reload::ReloadCtx {
         live: live.clone(),
         messages: messages.clone(),
         tx: tx.clone(),
         badges: badges.clone(),
         feed_swap: feed.swap_tx,
+        fe_watch: fe_watch_tx,
         rebind: rebind.clone(),
     };
     crate::reload::spawn_watcher(config_path, ctx, quit.clone());
