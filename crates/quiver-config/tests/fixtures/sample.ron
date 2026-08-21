@@ -1,0 +1,12 @@
+// Sample Quiver-style config. Verbose and explicit on purpose.
+// This fixture is consumed by tests/roundtrip_test.rs — the expected
+// values there are hand-written constants that must match this file.
+(
+    listen: "127.0.0.1:4783",
+    channel: "quiverdev",
+    theme: (
+        font_size_px: 18,
+        max_messages: 30,
+        message_lifetime_secs: 60,
+    ),
+)

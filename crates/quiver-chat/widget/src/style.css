@@ -1,0 +1,26 @@
+html,
+body {
+  margin: 0;
+  background: transparent; /* OBS browser source: transparency expected */
+  font-family: system-ui, sans-serif;
+  color: #efeff1;
+}
+
+#chat {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px;
+}
+
+.msg {
+  display: flex;
+  gap: 6px;
+  align-items: baseline;
+  word-break: break-word;
+}
+
+.user {
+  font-weight: 700;
+  white-space: nowrap;
+}

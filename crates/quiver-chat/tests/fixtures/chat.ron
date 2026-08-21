@@ -1,0 +1,15 @@
+// quiver-chat test fixture. Expected values live as hand-written
+// constants in tests/config_test.rs and must match this file.
+(
+    server: (
+        listen: "127.0.0.1:4783",
+    ),
+    twitch: (
+        channel: "quiverdev",
+    ),
+    theme: (
+        font_size_px: 18,
+        max_messages: 30,
+        message_lifetime_secs: 60,
+    ),
+)

@@ -1,0 +1,42 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace.dependencies]
+# internal crates
+quiver-config = { path = "crates/quiver-config" }
+quiver-twitch = { path = "crates/quiver-twitch" }
+
+# async runtime + CLI
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "sync", "time", "io-util"] }
+clap = { version = "4", features = ["derive"] }
+
+# config subsystem
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+ron = "0.12"
+schemars = "1"
+
+# errors + logging
+thiserror = "2"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# http/ws serving (widget host)
+axum = { version = "0.8", features = ["ws"] }
+tower-http = { version = "0.7", features = ["fs"] }
+
+# twitch chat connectivity
+twitch-irc = "6"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }

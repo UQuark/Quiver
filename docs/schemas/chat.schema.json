@@ -1,0 +1,79 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ChatConfig",
+  "type": "object",
+  "properties": {
+    "server": {
+      "$ref": "#/$defs/ServerConfig"
+    },
+    "theme": {
+      "$ref": "#/$defs/ThemeConfig"
+    },
+    "twitch": {
+      "$ref": "#/$defs/TwitchConfig"
+    }
+  },
+  "required": [
+    "server",
+    "twitch",
+    "theme"
+  ],
+  "$defs": {
+    "ServerConfig": {
+      "type": "object",
+      "properties": {
+        "listen": {
+          "description": "`host:port` the widget HTTP+WS server binds to.",
+          "type": "string"
+        },
+        "widget_dist": {
+          "description": "Optional absolute path to the built widget frontend directory.\nUnset → placeholder page is served at `/`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "listen"
+      ]
+    },
+    "ThemeConfig": {
+      "type": "object",
+      "properties": {
+        "font_size_px": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "max_messages": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "message_lifetime_secs": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "font_size_px",
+        "max_messages",
+        "message_lifetime_secs"
+      ]
+    },
+    "TwitchConfig": {
+      "type": "object",
+      "properties": {
+        "channel": {
+          "description": "Twitch channel login to read chat from (read-only anonymous join).",
+          "type": "string"
+        }
+      },
+      "required": [
+        "channel"
+      ]
+    }
+  }
+}
