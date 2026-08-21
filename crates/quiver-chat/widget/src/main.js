@@ -91,6 +91,10 @@ function expire(ids) {
 function applyMeta(meta) {
   if (!meta) return;
   if (meta.badges) badgeUrls = meta.badges;
+  // Role map drives BOTH class assignment on new rows and the injected
+  // sheet — forgetting to store it here meant styles existed but no row
+  // ever matched them.
+  roleCss = meta.role_css || {};
   if (meta.theme) {
     if (meta.theme.font_size_px) chat.style.fontSize = `${meta.theme.font_size_px}px`;
     if (meta.theme.max_messages) maxMessages = meta.theme.max_messages;
