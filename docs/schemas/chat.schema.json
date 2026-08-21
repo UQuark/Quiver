@@ -41,6 +41,13 @@
     "ThemeConfig": {
       "type": "object",
       "properties": {
+        "custom_css": {
+          "description": "Your own CSS, applied after the built-in widget styles. Authored as\na RON raw string (r#\"...\"#) so newlines and quotes stay untouched.\nParsed with lightningcss at load/reload; a parse error is reported\nas a warning but never blocks the tool.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "font_size_px": {
           "type": "integer",
           "format": "uint32",

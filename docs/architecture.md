@@ -86,15 +86,36 @@ All frames are single-line JSON objects with a `type` field:
 | `snapshot` | `{type, messages[], meta}` | full state for (re)connects and lag resyncs |
 | `message` | `{type, message}` | one new rendered message |
 | `expire` | `{type, ids[]}` | messages removed by count cap or age |
+| `config` | `{type, meta}` | hot reload: theme/badges/custom_css changed |
+| `clear` | `{type}` | channel swapped — history wiped |
 
-`meta` carries `{theme:{font_size_px, max_messages}, badges:{"set/version": url}}`.
-The engine owns the lifecycle: snapshots are always correct for late joiners,
-and clients never compute expiry themselves.
+`meta` carries `{theme:{font_size_px, max_messages}, badges:{"set/version": url},
+custom_css}`. The engine owns the lifecycle: snapshots are always correct for
+late joiners, and clients never compute expiry themselves.
 
 Emote positions are char indices into `text`, end exclusive (twitch-irc
 normalizes Twitch's UTF-16 inclusive wire format). Badge URLs require
 optional Twitch API credentials (`twitch.client_id`/`client_secret`,
 client-credentials flow); without them badges flow as data but render empty.
+
+## Hot reload
+
+The whole config file is watched (debounced directory watch + SIGHUP).
+A change triggers load → validate → diff → apply. Rejections (parse error,
+validation failure, invalid channel login) keep the current config — no
+half-applied state. Applied effects per field:
+
+- theme / custom_css → live, pushed to clients as a `config` frame
+- message_lifetime_secs → picked up by the sweep on its next tick
+- twitch.channel → live part/join on the same connection; history cleared
+- credentials → badge map refetch
+- server.widget_dist → resolved per request from disk
+- server.listen → HTTP listener rebinds live; WebSocket handlers are freed
+  via a generation token and pages auto-reconnect (a page pointed at the
+  old port cannot follow — repoint the OBS source URL once)
+
+Custom CSS is linted with lightningcss at load/reload; a parse failure is a
+warning, never fatal (browsers apply what they accept).
 
 ## Testing policy
 

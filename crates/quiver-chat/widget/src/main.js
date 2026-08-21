@@ -90,6 +90,23 @@ function applyMeta(meta) {
     if (meta.theme.font_size_px) chat.style.fontSize = `${meta.theme.font_size_px}px`;
     if (meta.theme.max_messages) maxMessages = meta.theme.max_messages;
   }
+  applyCustomCss(meta.custom_css);
+}
+
+// User CSS arrives via meta; injected after style.css so user rules win
+// equal-specificity ties. Re-applied on every snapshot/config frame.
+function applyCustomCss(css) {
+  let el = document.getElementById("custom-css");
+  if (!css) {
+    el?.remove();
+    return;
+  }
+  if (!el) {
+    el = document.createElement("style");
+    el.id = "custom-css";
+    document.head.append(el);
+  }
+  el.textContent = css;
 }
 
 function handle(wire) {
@@ -104,6 +121,14 @@ function handle(wire) {
       break;
     case "expire":
       expire(wire.ids || []);
+      break;
+    case "config":
+      // Hot reload: theme/badges/custom_css changed server-side.
+      applyMeta(wire.meta);
+      break;
+    case "clear":
+      // Channel swapped: history wiped server-side.
+      chat.replaceChildren();
       break;
   }
 }

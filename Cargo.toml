@@ -38,6 +38,12 @@ twitch-irc = "6"
 # helix api (badges)
 reqwest = { version = "0.13", features = ["json", "query"] }
 
+# config hot reload
+lightningcss = "=1.0.0-alpha.72"
+notify = "8"
+notify-debouncer-full = "0.7"
+tokio-util = "0.7"
+
 [workspace.lints.rust]
 unsafe_code = "forbid"
 

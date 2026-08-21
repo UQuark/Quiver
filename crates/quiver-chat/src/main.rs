@@ -66,5 +66,5 @@ fn main() -> anyhow::Result<()> {
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?
-        .block_on(quiver_chat::serve::run(cfg))
+        .block_on(quiver_chat::serve::run(cfg, args.config))
 }

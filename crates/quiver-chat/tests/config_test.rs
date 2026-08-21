@@ -66,3 +66,56 @@ fn ron_roundtrip_preserves_optional_field_semantics() {
     let again: ChatConfig = parse_str(&text).expect("re-parse");
     assert_eq!(cfg, again);
 }
+
+// ---- custom_css ----------------------------------------------------------
+
+#[test]
+fn raw_string_css_roundtrips_with_quotes_and_newlines() {
+    // RON raw string: no escaping of quotes or newlines.
+    // Outer Rust literal uses ## because the RON itself contains "#.
+    let raw = r##"
+(
+    server: ( listen: "127.0.0.1:1", ),
+    twitch: ( channel: "chan", ),
+    theme: (
+        font_size_px: 18,
+        max_messages: 30,
+        message_lifetime_secs: 60,
+        custom_css: Some(r#".msg { content: "x"; opacity: 0.5; }"#),
+    ),
+)
+"##;
+    let cfg: ChatConfig = parse_str(raw).expect("raw string CSS must parse");
+    let css = cfg.theme.custom_css.expect("css present");
+    assert_eq!(css, r#".msg { content: "x"; opacity: 0.5; }"#);
+}
+
+#[test]
+fn lint_accepts_valid_and_unknown_property_css() {
+    assert_eq!(
+        quiver_chat::config::lint_custom_css(".msg { opacity: 0.9; }"),
+        Ok(())
+    );
+    // Unknown properties are ignored by browsers — parser must agree.
+    assert_eq!(
+        quiver_chat::config::lint_custom_css(".a { blah-blah: 12px; }"),
+        Ok(())
+    );
+}
+
+#[test]
+fn lint_rejects_broken_css_with_position_info() {
+    let err = quiver_chat::config::lint_custom_css("} { color: red; ")
+        .expect_err("stray brace must be rejected");
+    assert!(!err.is_empty());
+}
+
+#[test]
+fn lint_tolerates_unclosed_final_block_like_browsers_do() {
+    // Browsers apply a truncated final rule; the parser matches that
+    // behavior, so the lint must not flag it.
+    assert_eq!(
+        quiver_chat::config::lint_custom_css(".msg { opacity: 0.9; "),
+        Ok(())
+    );
+}

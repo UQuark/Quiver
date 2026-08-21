@@ -16,9 +16,9 @@ pub const SAMPLE_CONFIG: &str = r#"// quiver-chat configuration. RON format, ver
     server: (
         // Address the widget server listens on. OBS browser source points here.
         listen: "127.0.0.1:4783",
-        // Optional: absolute path to the built widget frontend (widget/dist).
-        // When unset, a placeholder page is served instead.
-        // widget_dist: "/absolute/path/to/crates/quiver-chat/widget/dist",
+        // Optional: absolute path to the widget frontend directory
+        // (crates/quiver-chat/widget). No build step needed.
+        // widget_dist: "/absolute/path/to/crates/quiver-chat/widget",
     ),
     twitch: (
         // Channel login to read chat from (anonymous, read-only).
@@ -32,6 +32,11 @@ pub const SAMPLE_CONFIG: &str = r#"// quiver-chat configuration. RON format, ver
         font_size_px: 18,
         max_messages: 30,
         message_lifetime_secs: 60,
+        // Optional: your own CSS on top of the built-in styles.
+        // Author it as a RON RAW STRING so quotes and newlines need no
+        // escaping (raw strings open with r followed by hashes and a
+        // double-quote; see ThemeConfig docs).
+        // custom_css: Some("/* example */ .msg { opacity: 0.9; }"),
     ),
 )
 "#;
@@ -70,6 +75,33 @@ pub struct ThemeConfig {
     pub font_size_px: u32,
     pub max_messages: u32,
     pub message_lifetime_secs: u64,
+    /// Your own CSS, applied after the built-in widget styles. Authored as
+    /// a RON raw string (r#"..."#) so newlines and quotes stay untouched.
+    /// Parsed with lightningcss at load/reload; a parse error is reported
+    /// as a warning but never blocks the tool.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub custom_css: Option<String>,
+}
+
+/// Lint user CSS through a real parser (lightningcss).
+/// Advisory only: Ok means "browser will almost certainly accept it".
+pub fn lint_custom_css(css: &str) -> Result<(), String> {
+    let options = lightningcss::stylesheet::ParserOptions::default();
+    lightningcss::stylesheet::StyleSheet::parse(css, options)
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
+/// Log a warning when user CSS fails the lint. Never fatal.
+pub(crate) fn report_css_lint(css: Option<&str>) {
+    if let Some(css) = css
+        && let Err(e) = lint_custom_css(css)
+    {
+        tracing::warn!(
+            error = %e,
+            "custom_css looks broken — browsers will ignore invalid rules"
+        );
+    }
 }
 
 impl Validate for ChatConfig {

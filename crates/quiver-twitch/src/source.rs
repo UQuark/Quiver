@@ -23,6 +23,18 @@ pub struct IrcChatSource {
 }
 
 impl IrcChatSource {
+    /// Offline validation for a channel login (no network).
+    /// Used by hot reload to reject bad swap targets early.
+    pub fn validate_channel_login(login: &str) -> Result<(), twitch_irc::validate::Error> {
+        twitch_irc::validate::validate_login(login)
+    }
+
+    /// Clone of the underlying client handle — used for live channel
+    /// swaps (`part`+`join`) without touching the event stream.
+    pub fn client(&self) -> Client {
+        self._client.clone()
+    }
+
     /// Connect anonymously (justinfan — read-only, cannot send) and join
     /// `channel_login`. Connection is lazy: background tasks start once
     /// events are consumed.

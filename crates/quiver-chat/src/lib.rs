@@ -2,6 +2,8 @@
 
 pub mod config;
 pub mod engine;
+pub mod live;
+pub mod reload;
 pub mod serve;
 
 pub use config::ChatConfig;

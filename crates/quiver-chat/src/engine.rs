@@ -9,7 +9,7 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use quiver_twitch::{Badge, ChatMessage, EmoteRef, Event, IrcChatSource};
+use quiver_twitch::{Badge, ChatMessage, EmoteRef, Event};
 use serde::Serialize;
 use tracing::warn;
 
@@ -132,6 +132,24 @@ impl EngineState {
         expired
     }
 
+    /// Apply a new max_messages cap. Shrinking evicts oldest immediately;
+    /// returns their ids so they can be announced to clients.
+    pub fn set_max(&mut self, max_messages: usize) -> Vec<String> {
+        self.max_messages = max_messages;
+        let mut evicted = Vec::new();
+        while self.messages.len() > self.max_messages {
+            if let Some(old) = self.messages.pop_front() {
+                evicted.push(old.msg.id);
+            }
+        }
+        evicted
+    }
+
+    /// Drop all history (channel switch); returns the removed ids.
+    pub fn clear(&mut self) -> Vec<String> {
+        self.messages.drain(..).map(|e| e.msg.id).collect()
+    }
+
     pub fn messages(&self) -> impl Iterator<Item = &RenderedMessage> {
         self.messages.iter().map(|e| &e.msg)
     }
@@ -147,11 +165,16 @@ pub type SharedState = Arc<Mutex<EngineState>>;
 
 /// Consume events from `source`, announce every state change on `tx`,
 /// sweep expired messages every second. Returns when the source ends.
+///
+/// Reads `live` continuously: message lifetime and the expected channel
+/// login are picked up on every tick/event, so config reloads take effect
+/// without restarting the feed. Messages from other channels (stragglers
+/// around a channel swap) are dropped silently.
 pub async fn pump(
-    mut source: IrcChatSource,
+    live: crate::live::SharedLive,
     state: SharedState,
     tx: tokio::sync::broadcast::Sender<String>,
-    lifetime: Duration,
+    source: &mut quiver_twitch::IrcChatSource,
 ) {
     let mut ticker = tokio::time::interval(Duration::from_secs(1));
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -164,6 +187,10 @@ pub async fn pump(
                     return;
                 }
                 Some(Event::ChatMessage(cm)) => {
+                    let expected_channel = live.read().map(|l| l.channel.clone()).unwrap_or_default();
+                    if cm.channel_login != expected_channel {
+                        continue; // straggler from a swapped-away channel
+                    }
                     let rendered = RenderedMessage::from(cm);
                     let evicted = state.lock().map(|mut st| st.push(rendered.clone())).unwrap_or_default();
                     let frame = serde_json::json!({ "type": "message", "message": rendered });
@@ -176,6 +203,10 @@ pub async fn pump(
                 Some(_) => {}
             },
             _ = ticker.tick() => {
+                let lifetime = live
+                    .read()
+                    .map(|l| Duration::from_secs(l.theme.message_lifetime_secs))
+                    .unwrap_or(Duration::from_secs(60));
                 let expired = state
                     .lock()
                     .map(|mut st| st.sweep_expired(Instant::now(), lifetime))
@@ -237,6 +268,41 @@ mod tests {
         assert_eq!(st.len(), 2);
         let ids: Vec<_> = st.messages().map(|m| m.id.as_str()).collect();
         assert_eq!(ids, ["two", "three"]);
+    }
+
+    /// Ground truth BY HAND: shrinking 3→1 evicts exactly the two oldest.
+    #[test]
+    fn set_max_shrink_evicts_oldest_in_order() {
+        let mut st = EngineState::new(3);
+        for id in ["a", "b", "c"] {
+            st.push(msg(id));
+        }
+        let evicted = st.set_max(1);
+        assert_eq!(evicted, vec!["a".to_string(), "b".to_string()]);
+        let ids: Vec<_> = st.messages().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, ["c"]);
+    }
+
+    /// Growing the cap evicts nothing.
+    #[test]
+    fn set_max_grow_keeps_everything() {
+        let mut st = EngineState::new(2);
+        for id in ["a", "b"] {
+            st.push(msg(id));
+        }
+        assert!(st.set_max(5).is_empty());
+        assert_eq!(st.len(), 2);
+    }
+
+    /// Ground truth BY HAND: clear removes everything, in order.
+    #[test]
+    fn clear_drops_all_and_reports_ids() {
+        let mut st = EngineState::new(5);
+        for id in ["x", "y"] {
+            st.push(msg(id));
+        }
+        assert_eq!(st.clear(), vec!["x".to_string(), "y".to_string()]);
+        assert_eq!(st.len(), 0);
     }
 
     /// Ground truth BY HAND: fresh message within lifetime never swept.
