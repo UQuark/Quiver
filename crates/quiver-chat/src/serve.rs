@@ -420,7 +420,17 @@ async fn static_fallback(State(state): State<AppState>, req: Request) -> Respons
         full.push("index.html");
     }
     match std::fs::read(&full) {
-        Ok(bytes) => ([(header::CONTENT_TYPE, mime_of(&full))], bytes).into_response(),
+        Ok(bytes) => (
+            [
+                (header::CONTENT_TYPE, mime_of(&full)),
+                // Reloads must always pull fresh bytes from disk — without
+                // this, Chromium heuristically caches main.js and a stale
+                // copy keeps rendering no matter how many reloads fire.
+                (header::CACHE_CONTROL, "no-cache"),
+            ],
+            bytes,
+        )
+                .into_response(),
         Err(_) => (StatusCode::NOT_FOUND, "not found").into_response(),
     }
 }
