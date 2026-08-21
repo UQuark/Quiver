@@ -324,15 +324,14 @@ async fn apply_action(ctx: &ReloadCtx, action: &Action, new_live: &LiveConfig) {
             }
         },
         Action::BroadcastMeta => {
+            // IMPORTANT: build from new_live, NOT ctx.live — during apply,
+            // the shared slot still holds the OLD config (it is swapped in
+            // only after all actions ran). Reading it here broadcasts the
+            // previous state, making every reload appear one-behind.
             let badges = ctx.badges.read().map(|b| b.clone()).unwrap_or_default();
-            let live_now = ctx
-                .live
-                .read()
-                .map(|l| l.clone())
-                .unwrap_or_else(|_| new_live.clone());
             let frame = serde_json::json!({
                 "type": "config",
-                "meta": crate::serve::meta_value(&live_now, &badges),
+                "meta": crate::serve::meta_value(new_live, &badges),
             });
             let _ = ctx.tx.send(frame.to_string());
         }
