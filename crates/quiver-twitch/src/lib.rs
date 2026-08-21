@@ -8,8 +8,10 @@
 
 pub mod error;
 pub mod events;
+pub mod helix;
 pub mod source;
 
 pub use error::TwitchError;
 pub use events::{Badge, ChatMessage, EmoteRef, Event};
+pub use helix::{HelixClient, HelixError};
 pub use source::IrcChatSource;

@@ -8,9 +8,12 @@ publish.workspace = true
 twitch-irc = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["sync"] }
+reqwest = { workspace = true }
+serde = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }
+serde_json = { workspace = true }
 
 [lints]
 workspace = true
