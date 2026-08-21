@@ -101,7 +101,6 @@ function applyMeta(meta) {
 // Injected stylesheet order: builtin < role-css < custom-css.
 // At equal specificity later sheets win — so per-role snippets beat
 // built-ins, and the user's global custom_css beats everything.
-// append() MOVES existing nodes, re-appending both keeps the order stable.
 function applyUserStyles(roleCssMap, customCss) {
   roleCssMap = roleCssMap || {};
   let roleEl = document.getElementById("role-css");
@@ -128,8 +127,12 @@ function applyUserStyles(roleCssMap, customCss) {
     customEl.textContent = customCss;
   }
 
-  // Re-assert order after any creation.
-  if (roleEl && customEl) document.head.append(roleEl, customEl);
+  // Re-assert order — but ONLY between nodes still CONNECTED to the DOM.
+  // A removed node leaves its variable truthy; append() would resurrect it
+  // (this exact bug: outline survived custom_css=None).
+  if (roleEl?.isConnected && customEl?.isConnected) {
+    document.head.append(roleEl, customEl);
+  }
 }
 
 function handle(wire) {
@@ -168,8 +171,10 @@ function connect() {
   ws.onmessage = (ev) => {
     try {
       handle(JSON.parse(ev.data));
-    } catch {
-      // malformed frame — ignore, next snapshot resyncs
+    } catch (err) {
+      // Surface handler failures — a silent catch here once hid a whole
+      // class of "styles don't apply" bugs.
+      console.error("[quiver] frame handling failed:", err);
     }
   };
   ws.onclose = () => {
