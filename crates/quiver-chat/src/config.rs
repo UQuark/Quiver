@@ -23,6 +23,10 @@ pub const SAMPLE_CONFIG: &str = r#"// quiver-chat configuration. RON format, ver
     twitch: (
         // Channel login to read chat from (anonymous, read-only).
         channel: "your_channel_here",
+        // Optional Twitch API credentials — enable badge image URLs.
+        // Keep secrets out of version control (*.local.ron is git-ignored).
+        // client_id: "your_client_id",
+        // client_secret: "your_client_secret",
     ),
     theme: (
         font_size_px: 18,
@@ -53,6 +57,12 @@ pub struct ServerConfig {
 pub struct TwitchConfig {
     /// Twitch channel login to read chat from (read-only anonymous join).
     pub channel: String,
+    /// Twitch API client id — enables badge image URLs (Helix lookup).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_id: Option<String>,
+    /// Twitch API client secret. Keep ONLY in git-ignored local configs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_secret: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -85,6 +95,17 @@ impl Validate for ChatConfig {
                 .all(|c| c.is_ascii_alphanumeric() || c == '_'),
             "twitch.channel",
             "must contain only ASCII letters, digits and underscores (a Twitch login)",
+            &mut out,
+        );
+        // Credentials are only meaningful as a pair.
+        require(
+            self.twitch.client_id.is_some() == self.twitch.client_secret.is_some(),
+            if self.twitch.client_id.is_none() {
+                "twitch.client_id"
+            } else {
+                "twitch.client_secret"
+            },
+            "client_id and client_secret must be set together",
             &mut out,
         );
         require(

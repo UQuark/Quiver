@@ -77,6 +77,25 @@ hidden source of business logic.
 - schemars 1.x emits nested structs under `$defs` referenced by `$ref`
   (draft 2020-12), not inline.
 
+## Wire protocol (`/ws`)
+
+All frames are single-line JSON objects with a `type` field:
+
+| Frame | Shape | Meaning |
+|---|---|---|
+| `snapshot` | `{type, messages[], meta}` | full state for (re)connects and lag resyncs |
+| `message` | `{type, message}` | one new rendered message |
+| `expire` | `{type, ids[]}` | messages removed by count cap or age |
+
+`meta` carries `{theme:{font_size_px, max_messages}, badges:{"set/version": url}}`.
+The engine owns the lifecycle: snapshots are always correct for late joiners,
+and clients never compute expiry themselves.
+
+Emote positions are char indices into `text`, end exclusive (twitch-irc
+normalizes Twitch's UTF-16 inclusive wire format). Badge URLs require
+optional Twitch API credentials (`twitch.client_id`/`client_secret`,
+client-credentials flow); without them badges flow as data but render empty.
+
 ## Testing policy
 
 Integration tests with hand-written ground truth only — expected values are

@@ -2,21 +2,71 @@
 // this page only draws what the WebSocket feed sends.
 // No build step: plain ES module served as-is by quiver-chat.
 
+const EMOTE_CDN = "https://static-cdn.jtvnw.net/emoticons/v2/{id}/default/dark/2.0.png";
+
+let badgeUrls = {}; // "set_id/version" -> image url
+let maxMessages = 30;
+const EXPIRE_FADE_MS = 350;
+
+function el(tag, cls, text) {
+  const node = document.createElement(tag);
+  if (cls) node.className = cls;
+  if (text !== undefined) node.textContent = text;
+  return node;
+}
+
+function renderBadges(m) {
+  const wrap = el("span", "badges");
+  for (const b of m.badges || []) {
+    const url = badgeUrls[`${b.id}/${b.version}`];
+    if (!url) continue; // unknown badge — skip silently
+    const img = document.createElement("img");
+    img.className = "badge";
+    img.src = url;
+    img.alt = b.id;
+    wrap.append(img);
+  }
+  return wrap;
+}
+
+// Split text on emote ranges: plain slices as text nodes, emote spans as imgs.
+function renderText(m) {
+  const wrap = el("span", "text");
+  const emotes = [...(m.emotes || [])].sort((a, b) => a.start - b.start);
+  let cursor = 0;
+  for (const e of emotes) {
+    if (e.start < cursor || e.end > m.text.length) continue; // malformed range
+    if (e.start > cursor) wrap.append(document.createTextNode(m.text.slice(cursor, e.start)));
+    const img = document.createElement("img");
+    img.className = "emote";
+    img.src = EMOTE_CDN.replace("{id}", encodeURIComponent(e.id));
+    img.alt = m.text.slice(e.start, e.end);
+    wrap.append(img);
+    cursor = e.end;
+  }
+  if (cursor < m.text.length) wrap.append(document.createTextNode(m.text.slice(cursor)));
+  return wrap;
+}
+
 function renderMessage(m) {
-  const row = document.createElement("div");
-  row.className = "msg";
+  const row = el("div", "msg");
   row.dataset.id = m.id;
 
-  const user = document.createElement("span");
-  user.className = "user";
-  user.textContent = m.display_name;
+  row.append(renderBadges(m));
+
+  const user = el("span", "user", m.display_name);
   if (m.color) user.style.color = m.color;
+  row.append(user);
 
-  const text = document.createElement("span");
-  text.className = "text";
-  text.textContent = m.text; // never innerHTML — no injection
-
-  row.append(user, text);
+  if (m.is_action) {
+    // /me lines: whole line italic in the user's color, no separator.
+    row.classList.add("action");
+    if (m.color) row.style.color = m.color;
+    row.append(renderText(m));
+  } else {
+    row.append(el("span", "sep", ":"));
+    row.append(renderText(m));
+  }
   return row;
 }
 
@@ -24,14 +74,36 @@ function trimTo(max) {
   while (chat.children.length > max) chat.firstElementChild?.remove();
 }
 
+function expire(ids) {
+  for (const id of ids) {
+    const node = chat.querySelector(`[data-id="${CSS.escape(id)}"]`);
+    if (!node) continue;
+    node.classList.add("expiring");
+    setTimeout(() => node.remove(), EXPIRE_FADE_MS);
+  }
+}
+
+function applyMeta(meta) {
+  if (!meta) return;
+  if (meta.badges) badgeUrls = meta.badges;
+  if (meta.theme) {
+    if (meta.theme.font_size_px) chat.style.fontSize = `${meta.theme.font_size_px}px`;
+    if (meta.theme.max_messages) maxMessages = meta.theme.max_messages;
+  }
+}
+
 function handle(wire) {
   switch (wire.type) {
     case "snapshot":
-      chat.replaceChildren(...wire.messages.map(renderMessage));
+      applyMeta(wire.meta);
+      chat.replaceChildren(...(wire.messages || []).map(renderMessage));
       break;
     case "message":
       chat.append(renderMessage(wire.message));
-      trimTo(30);
+      trimTo(maxMessages);
+      break;
+    case "expire":
+      expire(wire.ids || []);
       break;
   }
 }

@@ -11,6 +11,7 @@ body {
   flex-direction: column;
   gap: 4px;
   padding: 8px;
+  overflow: hidden;
 }
 
 .msg {
@@ -18,9 +19,57 @@ body {
   gap: 6px;
   align-items: baseline;
   word-break: break-word;
+  animation: msg-in 180ms ease-out;
+}
+
+@keyframes msg-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.msg.expiring {
+  opacity: 0;
+  transform: translateY(-4px);
+  transition:
+    opacity 300ms ease-in,
+    transform 300ms ease-in;
 }
 
 .user {
   font-weight: 700;
   white-space: nowrap;
+}
+
+.sep {
+  opacity: 0.6;
+}
+
+.msg.action {
+  font-style: italic;
+}
+.msg.action .text {
+  font-style: italic;
+}
+
+.badges {
+  display: inline-flex;
+  gap: 2px;
+  align-self: center;
+}
+
+.badge {
+  height: 1em;
+  vertical-align: middle;
+}
+
+.emote {
+  height: 1.4em;
+  vertical-align: middle;
+  margin: 0 1px;
 }

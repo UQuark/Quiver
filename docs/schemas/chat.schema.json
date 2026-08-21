@@ -69,6 +69,20 @@
         "channel": {
           "description": "Twitch channel login to read chat from (read-only anonymous join).",
           "type": "string"
+        },
+        "client_id": {
+          "description": "Twitch API client id — enables badge image URLs (Helix lookup).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "client_secret": {
+          "description": "Twitch API client secret. Keep ONLY in git-ignored local configs.",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "required": [
