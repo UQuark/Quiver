@@ -25,7 +25,7 @@ hidden source of business logic.
 | `crates/quiver-config` | lib — RON loading, semantic validation, JSON Schema export |
 | `crates/quiver-twitch` | lib — THE Twitch layer (facade over `twitch-irc`) |
 | `crates/quiver-chat` | tool 1 — chat widget engine (`quiver-chat` binary) |
-| `crates/quiver-chat/widget` | browser-source frontend (TS/vite, not cargo) |
+| `crates/quiver-chat/widget` | browser-source frontend (plain HTML/CSS/ES-module, not cargo, no build step) |
 | `ui/` | reserved for the future UI app; outside the Cargo workspace |
 | `docs/schemas/` | generated JSON Schemas (the UI↔tool contract) |
 
@@ -56,6 +56,9 @@ hidden source of business logic.
    files from `server.widget_dist` (config override) plus a live WebSocket
    feed at `/ws`; OBS points at the listen address. Page = dumb renderer;
    engine = headless brain. Placeholder page is served when no dist exists.
+   The frontend is deliberately framework-free vanilla ES modules: no npm,
+   no bundler — the browser loads it directly. Reintroduce tooling only
+   when the frontend's real complexity demands it.
 
 6. **Config-first failure mode.** Chat feed failure must not kill the
    widget server — OBS keeps rendering; the feed stays empty until restart.
@@ -85,5 +88,3 @@ via the library's own parser path. No live network in tests.
 
 - `ui/`: reads `docs/schemas/*.json`, generates RON configs.
 - Optional `quiver` dispatcher binary calling tool libs directly.
-- Widget assets embedded into the binary once a build exists (rust-embed),
-  with `widget_dist` remaining as override.
