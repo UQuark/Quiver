@@ -430,7 +430,7 @@ async fn static_fallback(State(state): State<AppState>, req: Request) -> Respons
             ],
             bytes,
         )
-                .into_response(),
+            .into_response(),
         Err(_) => (StatusCode::NOT_FOUND, "not found").into_response(),
     }
 }

@@ -139,6 +139,49 @@ function applyUserStyles(roleCssMap, customCss) {
   }
 }
 
+const EVENT_STYLES = {
+  sub: { icon: "★", bg: "rgba(145,70,255,.25)", border: "#9146FF" },
+  gift_sub: { icon: "🎁", bg: "rgba(145,70,255,.18)", border: "#9146FF" },
+  mystery_gift: { icon: "🎁🎁", bg: "rgba(145,70,255,.22)", border: "#9146FF" },
+  raid: { icon: "⚔", bg: "rgba(255,140,0,.22)", border: "#FF8C00" },
+};
+const EVENT_BANNER_MS = 8000;
+
+function showEvent(ev) {
+  const style = EVENT_STYLES[ev.kind];
+  if (!style) return;
+  const banner = el("div", "event");
+  banner.style.background = style.bg;
+  banner.style.borderColor = style.border;
+
+  let text = "";
+  switch (ev.kind) {
+    case "sub":
+      text = ev.is_resub
+        ? `${ev.display_name} resubbed (${ev.cumulative_months} mo${ev.streak_months ? `, ${ev.streak_months} streak` : ""})`
+        : `${ev.display_name} subscribed!`;
+      if (ev.message) banner.title = ev.message;
+      break;
+    case "gift_sub":
+      text = `${ev.gifter_display_name || "An anonymous gifter"} gifted a sub to ${ev.recipient_display_name}`;
+      break;
+    case "mystery_gift":
+      text = `${ev.gifter_display_name || "An anonymous gifter"} is gifting ${ev.mass_gift_count} subs!`;
+      break;
+    case "raid":
+      text = `${ev.from_display_name} raided with ${ev.viewers} viewers!`;
+      break;
+  }
+  banner.append(el("span", "event-icon", style.icon), el("span", "event-text", text));
+
+  // Banners ride ABOVE the chat flow and leave on their own.
+  chat.prepend(banner);
+  setTimeout(() => {
+    banner.classList.add("expiring");
+    setTimeout(() => banner.remove(), EXPIRE_FADE_MS);
+  }, EVENT_BANNER_MS);
+}
+
 function handle(wire) {
   switch (wire.type) {
     case "snapshot":
@@ -155,6 +198,9 @@ function handle(wire) {
     case "config":
       // Hot reload: theme/badges/custom_css changed server-side.
       applyMeta(wire.meta);
+      break;
+    case "event":
+      showEvent(wire.event);
       break;
     case "clear":
       // Channel swapped: history wiped server-side.

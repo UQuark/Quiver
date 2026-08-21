@@ -9,9 +9,98 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use quiver_twitch::{Badge, ChatMessage, EmoteRef, Event};
+use quiver_twitch::{
+    Badge, ChatMessage, EmoteRef, Event, GiftSubEvent, MysteryGiftEvent, RaidEvent, SubEvent,
+};
 use serde::Serialize;
 use tracing::warn;
+
+/// Rich chat events (subs/gifts/raids) on the wire.
+/// Transient by design: announced once, never part of snapshots.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum WireEvent {
+    Sub {
+        user_login: String,
+        display_name: String,
+        is_resub: bool,
+        tier: String,
+        cumulative_months: u64,
+        streak_months: Option<u64>,
+        message: Option<String>,
+    },
+    GiftSub {
+        gifter_login: Option<String>,
+        gifter_display_name: Option<String>,
+        recipient_login: String,
+        recipient_display_name: String,
+        tier: String,
+        cumulative_months: u64,
+        num_gifted_months: u64,
+    },
+    MysteryGift {
+        gifter_login: Option<String>,
+        gifter_display_name: Option<String>,
+        mass_gift_count: u64,
+        sender_total_gifts: Option<u64>,
+        tier: String,
+    },
+    Raid {
+        from_login: String,
+        from_display_name: String,
+        viewers: u64,
+    },
+}
+
+impl From<SubEvent> for WireEvent {
+    fn from(s: SubEvent) -> Self {
+        Self::Sub {
+            user_login: s.user_login,
+            display_name: s.display_name,
+            is_resub: s.is_resub,
+            tier: s.tier,
+            cumulative_months: s.cumulative_months,
+            streak_months: s.streak_months,
+            message: s.message,
+        }
+    }
+}
+
+impl From<GiftSubEvent> for WireEvent {
+    fn from(g: GiftSubEvent) -> Self {
+        Self::GiftSub {
+            gifter_login: g.gifter_login,
+            gifter_display_name: g.gifter_display_name,
+            recipient_login: g.recipient_login,
+            recipient_display_name: g.recipient_display_name,
+            tier: g.tier,
+            cumulative_months: g.cumulative_months,
+            num_gifted_months: g.num_gifted_months,
+        }
+    }
+}
+
+impl From<MysteryGiftEvent> for WireEvent {
+    fn from(m: MysteryGiftEvent) -> Self {
+        Self::MysteryGift {
+            gifter_login: m.gifter_login,
+            gifter_display_name: m.gifter_display_name,
+            mass_gift_count: m.mass_gift_count,
+            sender_total_gifts: m.sender_total_gifts,
+            tier: m.tier,
+        }
+    }
+}
+
+impl From<RaidEvent> for WireEvent {
+    fn from(r: RaidEvent) -> Self {
+        Self::Raid {
+            from_login: r.from_login,
+            from_display_name: r.from_display_name,
+            viewers: r.viewers,
+        }
+    }
+}
 
 /// Badge reference on the wire (`id`/`version` pair).
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -70,7 +159,7 @@ impl From<ChatMessage> for RenderedMessage {
             display_name: cm.display_name,
             color: cm.color,
             is_action: false, // twitch-irc strips /me markers; see TODO below
-            text: cm.text.clone(),
+            text: cm.text,
             emotes: cm.emotes.iter().map(WireEmote::from).collect(),
             badges: cm.badges.iter().map(WireBadge::from).collect(),
         }
@@ -163,6 +252,12 @@ impl EngineState {
 /// Shared handle used by the server and the pump task.
 pub type SharedState = Arc<Mutex<EngineState>>;
 
+fn send_event<E: Into<WireEvent>>(tx: &tokio::sync::broadcast::Sender<String>, ev: E) {
+    let wire: WireEvent = ev.into();
+    let frame = serde_json::json!({ "type": "event", "event": wire });
+    let _ = tx.send(frame.to_string());
+}
+
 /// Consume events from `source`, announce every state change on `tx`,
 /// sweep expired messages every second. Returns when the source ends.
 ///
@@ -200,6 +295,10 @@ pub async fn pump(
                         let _ = tx.send(frame.to_string());
                     }
                 }
+                Some(Event::Sub(s)) => send_event(&tx, s),
+                Some(Event::GiftSub(g)) => send_event(&tx, g),
+                Some(Event::MysteryGift(m)) => send_event(&tx, m),
+                Some(Event::Raid(r)) => send_event(&tx, r),
                 Some(_) => {}
             },
             _ = ticker.tick() => {
@@ -303,6 +402,31 @@ mod tests {
         }
         assert_eq!(st.clear(), vec!["x".to_string(), "y".to_string()]);
         assert_eq!(st.len(), 0);
+    }
+
+    /// Ground truth BY HAND: wire frames are internally-tagged JSON.
+    #[test]
+    fn wire_events_serialize_with_kind_tag() {
+        let raid = WireEvent::Raid {
+            from_login: "raider".into(),
+            from_display_name: "Raider".into(),
+            viewers: 42,
+        };
+        let v = serde_json::to_value(&raid).expect("serializes");
+        assert_eq!(v["kind"], "raid");
+        assert_eq!(v["viewers"], 42);
+        assert_eq!(v["from_display_name"], "Raider");
+
+        let gift = WireEvent::MysteryGift {
+            gifter_login: None,
+            gifter_display_name: None,
+            mass_gift_count: 10,
+            sender_total_gifts: None,
+            tier: "1000".into(),
+        };
+        let v = serde_json::to_value(&gift).expect("serializes");
+        assert_eq!(v["kind"], "mystery_gift");
+        assert!(v["gifter_login"].is_null());
     }
 
     /// Ground truth BY HAND: fresh message within lifetime never swept.

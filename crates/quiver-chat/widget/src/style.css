@@ -73,3 +73,18 @@ body {
   vertical-align: middle;
   margin: 0 1px;
 }
+
+.event {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  padding: 6px 10px;
+  border-radius: 6px;
+  border-left: 4px solid;
+  font-weight: 600;
+  animation: msg-in 180ms ease-out;
+}
+
+.event-icon {
+  font-size: 1.2em;
+}

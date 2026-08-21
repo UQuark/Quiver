@@ -12,6 +12,8 @@ pub mod helix;
 pub mod source;
 
 pub use error::TwitchError;
-pub use events::{Badge, ChatMessage, EmoteRef, Event};
+pub use events::{
+    Badge, ChatMessage, EmoteRef, Event, GiftSubEvent, MysteryGiftEvent, RaidEvent, SubEvent,
+};
 pub use helix::{HelixClient, HelixError};
 pub use source::IrcChatSource;
