@@ -4,6 +4,7 @@
 //! The future Quiver UI generates configs of this shape from the JSON
 //! Schema exported via `quiver-chat --print-schema`.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use quiver_config::{Validate, ValidationIssue, require};
@@ -37,6 +38,13 @@ pub const SAMPLE_CONFIG: &str = r#"// quiver-chat configuration. RON format, ver
         // escaping (raw strings open with r followed by hashes and a
         // double-quote; see ThemeConfig docs).
         // custom_css: Some("/* example */ .msg { opacity: 0.9; }"),
+        // Optional per-role CSS keyed by Twitch badge id (a RON map:
+        // brace braces, quoted keys). Message rows get role-<id> classes;
+        // snippets inject before custom_css.
+        // role_css: Some({
+        //     "moderator": ".msg { background: rgba(0,0,0,.35); }",
+        //     "broadcaster": ".msg { border-left: 3px solid red; }",
+        // }),
     ),
 )
 "#;
@@ -76,11 +84,17 @@ pub struct ThemeConfig {
     pub max_messages: u32,
     pub message_lifetime_secs: u64,
     /// Your own CSS, applied after the built-in widget styles. Authored as
-    /// a RON raw string (r#"..."#) so newlines and quotes stay untouched.
+    /// a RON raw string so newlines and quotes stay untouched.
     /// Parsed with lightningcss at load/reload; a parse error is reported
     /// as a warning but never blocks the tool.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub custom_css: Option<String>,
+    /// Per-role CSS: Twitch badge set id -> CSS snippet applied to messages
+    /// whose sender carries that badge. Message rows get `role-<id>` classes,
+    /// snippets are injected before custom_css. Common ids: broadcaster,
+    /// moderator, vip, subscriber, founder.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub role_css: Option<HashMap<String, String>>,
 }
 
 /// Lint user CSS through a real parser (lightningcss).
@@ -93,7 +107,7 @@ pub fn lint_custom_css(css: &str) -> Result<(), String> {
 }
 
 /// Log a warning when user CSS fails the lint. Never fatal.
-pub(crate) fn report_css_lint(css: Option<&str>) {
+pub(crate) fn report_css_lint(css: Option<&str>, role_css: Option<&HashMap<String, String>>) {
     if let Some(css) = css
         && let Err(e) = lint_custom_css(css)
     {
@@ -101,6 +115,17 @@ pub(crate) fn report_css_lint(css: Option<&str>) {
             error = %e,
             "custom_css looks broken — browsers will ignore invalid rules"
         );
+    }
+    if let Some(map) = role_css {
+        for (role, snippet) in map {
+            if let Err(e) = lint_custom_css(snippet) {
+                tracing::warn!(
+                    role = %role,
+                    error = %e,
+                    "role_css snippet looks broken — browsers will ignore invalid rules"
+                );
+            }
+        }
     }
 }
 

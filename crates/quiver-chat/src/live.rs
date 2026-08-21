@@ -112,6 +112,7 @@ mod tests {
                 max_messages: max,
                 message_lifetime_secs: lifetime,
                 custom_css: None,
+                role_css: None,
             },
         }
     }

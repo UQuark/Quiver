@@ -144,7 +144,10 @@ async fn apply_reload(path: &Path, ctx: &ReloadCtx) {
         return;
     }
 
-    crate::config::report_css_lint(new_cfg.theme.custom_css.as_deref());
+    crate::config::report_css_lint(
+        new_cfg.theme.custom_css.as_deref(),
+        new_cfg.theme.role_css.as_ref(),
+    );
 
     // 3. Diff against what is running.
     let old_live = match ctx.live.read() {

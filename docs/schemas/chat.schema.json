@@ -42,7 +42,7 @@
       "type": "object",
       "properties": {
         "custom_css": {
-          "description": "Your own CSS, applied after the built-in widget styles. Authored as\na RON raw string (r#\"...\"#) so newlines and quotes stay untouched.\nParsed with lightningcss at load/reload; a parse error is reported\nas a warning but never blocks the tool.",
+          "description": "Your own CSS, applied after the built-in widget styles. Authored as\na RON raw string so newlines and quotes stay untouched.\nParsed with lightningcss at load/reload; a parse error is reported\nas a warning but never blocks the tool.",
           "type": [
             "string",
             "null"
@@ -62,6 +62,16 @@
           "type": "integer",
           "format": "uint64",
           "minimum": 0
+        },
+        "role_css": {
+          "description": "Per-role CSS: Twitch badge set id -> CSS snippet applied to messages\nwhose sender carries that badge. Message rows get `role-<id>` classes,\nsnippets are injected before custom_css. Common ids: broadcaster,\nmoderator, vip, subscriber, founder.",
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": {
+            "type": "string"
+          }
         }
       },
       "required": [

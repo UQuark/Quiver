@@ -119,3 +119,38 @@ fn lint_tolerates_unclosed_final_block_like_browsers_do() {
         Ok(())
     );
 }
+
+// ---- role_css -------------------------------------------------------------
+
+// Ground truth by hand: three roles, exact strings preserved.
+#[test]
+fn role_css_map_parses_with_exact_snippets() {
+    let raw = r##"
+(
+    server: ( listen: "127.0.0.1:1", ),
+    twitch: ( channel: "chan", ),
+    theme: (
+        font_size_px: 18,
+        max_messages: 30,
+        message_lifetime_secs: 60,
+        role_css: Some({
+            "moderator": ".msg { background: rgba(0,0,0,.35); }",
+            "broadcaster": ".msg { border-left: 3px solid red; }",
+            "vip": ".user { text-shadow: 0 0 4px pink; }",
+        }),
+    ),
+)
+"##;
+    let cfg: ChatConfig = parse_str(raw).expect("role_css must parse");
+    let roles = cfg.theme.role_css.expect("map present");
+    assert_eq!(roles.len(), 3);
+    assert_eq!(
+        roles.get("moderator").map(String::as_str),
+        Some(".msg { background: rgba(0,0,0,.35); }")
+    );
+    assert_eq!(
+        roles.get("broadcaster").map(String::as_str),
+        Some(".msg { border-left: 3px solid red; }")
+    );
+    assert!(!roles.contains_key("subscriber"));
+}

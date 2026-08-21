@@ -66,7 +66,7 @@ pub async fn run(cfg: ChatConfig, config_path: PathBuf) -> anyhow::Result<()> {
         cfg.theme.max_messages as usize,
     )));
 
-    crate::config::report_css_lint(cfg.theme.custom_css.as_deref());
+    crate::config::report_css_lint(cfg.theme.custom_css.as_deref(), cfg.theme.role_css.as_ref());
 
     let initial_badges = load_badge_map_opt(
         cfg.twitch.client_id.as_deref(),
@@ -335,6 +335,7 @@ pub(crate) fn meta_value(live: &LiveConfig, badges: &HashMap<String, String>) ->
         },
         "badges": badges,
         "custom_css": live.theme.custom_css,
+        "role_css": live.theme.role_css,
     })
 }
 
@@ -438,5 +439,48 @@ fn mime_of(path: &Path) -> &'static str {
         Some("woff2") => "font/woff2",
         Some("txt") => "text/plain; charset=utf-8",
         _ => "application/octet-stream",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::ThemeConfig;
+
+    fn live_with(custom: Option<&str>, role: Option<HashMap<String, String>>) -> LiveConfig {
+        LiveConfig {
+            listen: "127.0.0.1:1".into(),
+            widget_dist: None,
+            channel: "chan".into(),
+            creds: None,
+            theme: ThemeConfig {
+                font_size_px: 18,
+                max_messages: 30,
+                message_lifetime_secs: 60,
+                custom_css: custom.map(str::to_string),
+                role_css: role,
+            },
+        }
+    }
+
+    /// Ground truth by hand: meta mirrors exactly what was passed in.
+    #[test]
+    fn meta_carries_custom_and_role_css() {
+        let mut roles = HashMap::new();
+        roles.insert("moderator".to_string(), ".msg{}".to_string());
+        let live = live_with(Some("/*c*/"), Some(roles));
+        let m = meta_value(&live, &HashMap::new());
+
+        assert_eq!(m["custom_css"], "/*c*/");
+        assert_eq!(m["role_css"]["moderator"], ".msg{}");
+        assert_eq!(m["theme"]["font_size_px"], 18);
+    }
+
+    #[test]
+    fn meta_omits_unset_css_fields_as_null() {
+        let live = live_with(None, None);
+        let m = meta_value(&live, &HashMap::new());
+        assert!(m["custom_css"].is_null());
+        assert!(m["role_css"].is_null());
     }
 }

@@ -6,8 +6,8 @@ const EMOTE_CDN = "https://static-cdn.jtvnw.net/emoticons/v2/{id}/default/dark/2
 
 let badgeUrls = {}; // "set_id/version" -> image url
 let maxMessages = 30;
+let roleCss = {}; // badge set id -> css snippet for message rows
 const EXPIRE_FADE_MS = 350;
-
 function el(tag, cls, text) {
   const node = document.createElement(tag);
   if (cls) node.className = cls;
@@ -52,6 +52,11 @@ function renderMessage(m) {
   const row = el("div", "msg");
   row.dataset.id = m.id;
 
+  // Per-role classes: one per configured badge id the sender carries.
+  for (const b of m.badges || []) {
+    if (roleCss[b.id]) row.classList.add(`role-${CSS.escape(b.id)}`);
+  }
+
   row.append(renderBadges(m));
 
   const user = el("span", "user", m.display_name);
@@ -90,23 +95,41 @@ function applyMeta(meta) {
     if (meta.theme.font_size_px) chat.style.fontSize = `${meta.theme.font_size_px}px`;
     if (meta.theme.max_messages) maxMessages = meta.theme.max_messages;
   }
-  applyCustomCss(meta.custom_css);
+  applyUserStyles(meta.role_css, meta.custom_css);
 }
 
-// User CSS arrives via meta; injected after style.css so user rules win
-// equal-specificity ties. Re-applied on every snapshot/config frame.
-function applyCustomCss(css) {
-  let el = document.getElementById("custom-css");
-  if (!css) {
-    el?.remove();
-    return;
+// Injected stylesheet order: builtin < role-css < custom-css.
+// At equal specificity later sheets win — so per-role snippets beat
+// built-ins, and the user's global custom_css beats everything.
+// append() MOVES existing nodes, re-appending both keeps the order stable.
+function applyUserStyles(roleCssMap, customCss) {
+  roleCssMap = roleCssMap || {};
+  let roleEl = document.getElementById("role-css");
+  let customEl = document.getElementById("custom-css");
+
+  const roleText = Object.values(roleCssMap).join("\n");
+  if (!roleText) roleEl?.remove();
+  else {
+    if (!roleEl) {
+      roleEl = document.createElement("style");
+      roleEl.id = "role-css";
+      document.head.append(roleEl);
+    }
+    roleEl.textContent = roleText;
   }
-  if (!el) {
-    el = document.createElement("style");
-    el.id = "custom-css";
-    document.head.append(el);
+
+  if (!customCss) customEl?.remove();
+  else {
+    if (!customEl) {
+      customEl = document.createElement("style");
+      customEl.id = "custom-css";
+      document.head.append(customEl);
+    }
+    customEl.textContent = customCss;
   }
-  el.textContent = css;
+
+  // Re-assert order after any creation.
+  if (roleEl && customEl) document.head.append(roleEl, customEl);
 }
 
 function handle(wire) {
