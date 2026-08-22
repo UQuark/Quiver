@@ -9,23 +9,48 @@ const EMOTE_CDN = "https://static-cdn.jtvnw.net/emoticons/v1/{id}/2.0";
 let badgeUrls = {}; // "set_id/version" -> image url
 let maxMessages = 30;
 let roleCss = {}; // badge set id -> css snippet for message rows
-let thirdParty = {}; // emote name -> image url (7TV etc.), engine-provided
+// provider tag -> {emote name -> url}; always fully populated, gating is
+// done client-side via emoteFlags so disabled providers STRIP tokens.
+let thirdParty = {};
+let emoteFlags = { twitch: true, unicode: true, seventv: true, bttv: true, ffz: true };
+// Lookup precedence when the same code exists in multiple providers.
+const PROVIDER_ORDER = ["ffz", "bttv", "seventv"];
 const EXPIRE_FADE_MS = 350;
 
-// Third-party emotes arrive as bare words in text (no Twitch metadata).
-// The engine serves a merged {name: url} map; fetched once per page load.
 fetch("/emotes.json")
   .then((r) => (r.ok ? r.json() : Promise.reject(r.status)))
   .then((d) => {
-    thirdParty = d.emotes || {};
-    console.debug("[quiver] third-party emotes loaded:", Object.keys(thirdParty).length);
+    thirdParty = d.providers || {};
+    const n = Object.values(thirdParty).reduce((a, m) => a + Object.keys(m).length, 0);
+    console.debug("[quiver] third-party emotes loaded:", n);
   })
   .catch((e) => console.debug("[quiver] no third-party emotes:", e));
 
+function lookupThirdParty(token) {
+  for (const p of PROVIDER_ORDER) {
+    if (!emoteFlags[p]) continue; // provider disabled
+    const url = thirdParty[p]?.[token];
+    if (url) return url;
+  }
+  return null;
+}
+
+// Unicode pictograph runs (incl. ZWJ sequences + variation selectors).
+const UNICODE_EMOJI_RE = /[\p{Extended_Pictographic}\u{1F3FB}-\u{1F3FF}\uFE0F\u200D]+/gu;
+
 function appendTokens(wrap, text) {
+  if (!emoteFlags.unicode) {
+    // Disabled unicode = strip emoji characters from text entirely.
+    text = text.replace(UNICODE_EMOJI_RE, "");
+    if (!text.trim()) return;
+  }
   for (const part of text.split(/(\s+)/)) {
     if (!part) continue;
-    const url = /^\s+$/.test(part) ? null : thirdParty[part];
+    if (/^\s+$/.test(part)) {
+      wrap.append(document.createTextNode(part));
+      continue;
+    }
+    const url = lookupThirdParty(part);
     if (url) {
       const img = document.createElement("img");
       img.className = "emote";
@@ -66,11 +91,15 @@ function renderText(m) {
   for (const e of emotes) {
     if (e.start < cursor || e.end > m.text.length) continue; // malformed range
     if (e.start > cursor) appendTokens(wrap, m.text.slice(cursor, e.start));
-    const img = document.createElement("img");
-    img.className = "emote";
-    img.src = EMOTE_CDN.replace("{id}", encodeURIComponent(e.id));
-    img.alt = m.text.slice(e.start, e.end);
-    wrap.append(img);
+    if (emoteFlags.twitch) {
+      const img = document.createElement("img");
+      img.className = "emote";
+      img.src = EMOTE_CDN.replace("{id}", encodeURIComponent(e.id));
+      img.alt = m.text.slice(e.start, e.end);
+      wrap.append(img);
+    } else if (!emoteFlags.unicode) {
+      // Both disabled: the code counts as an emoji — strip it.
+    }
     cursor = e.end;
   }
   if (cursor < m.text.length) appendTokens(wrap, m.text.slice(cursor));
@@ -120,6 +149,7 @@ function expire(ids) {
 function applyMeta(meta) {
   if (!meta) return;
   if (meta.badges) badgeUrls = meta.badges;
+  if (meta.emote_flags) emoteFlags = meta.emote_flags;
   // Role map drives BOTH class assignment on new rows and the injected
   // sheet — forgetting to store it here meant styles existed but no row
   // ever matched them.

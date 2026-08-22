@@ -202,7 +202,7 @@ fn router(state: AppState) -> Router {
                 (
                     [(header::CONTENT_TYPE, "application/json")],
                     [(header::CACHE_CONTROL, "no-cache")],
-                    serde_json::json!({ "emotes": map }).to_string(),
+                    serde_json::json!({ "providers": map }).to_string(),
                 )
             }),
         )
@@ -360,6 +360,13 @@ pub(crate) fn meta_value(live: &LiveConfig, badges: &HashMap<String, String>) ->
         "badges": badges,
         "custom_css": live.theme.custom_css,
         "role_css": live.theme.role_css,
+        "emote_flags": {
+            "twitch": live.emotes.twitch,
+            "unicode": live.emotes.unicode,
+            "seventv": live.emotes.seventv,
+            "bttv": live.emotes.bttv,
+            "ffz": live.emotes.ffz,
+        },
     })
 }
 
@@ -479,7 +486,7 @@ fn mime_of(path: &Path) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::ThemeConfig;
+    use crate::config::{EmotesConfig, ThemeConfig};
 
     fn live_with(custom: Option<&str>, role: Option<HashMap<String, String>>) -> LiveConfig {
         LiveConfig {
@@ -494,6 +501,7 @@ mod tests {
                 custom_css: custom.map(str::to_string),
                 role_css: role,
             },
+            emotes: EmotesConfig::default(),
         }
     }
 

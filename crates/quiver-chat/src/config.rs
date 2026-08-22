@@ -29,6 +29,11 @@ pub const SAMPLE_CONFIG: &str = r#"// quiver-chat configuration. RON format, ver
         // client_id: "your_client_id",
         // client_secret: "your_client_secret",
     ),
+    // Emote sources — all enabled by default; false removes that
+    // provider's emojis (or unicode emoji characters) from messages.
+    // emotes: (
+    //     twitch: true, unicode: true, seventv: true, bttv: true, ffz: true,
+    // ),
     theme: (
         font_size_px: 18,
         max_messages: 30,
@@ -54,6 +59,46 @@ pub struct ChatConfig {
     pub server: ServerConfig,
     pub twitch: TwitchConfig,
     pub theme: ThemeConfig,
+    /// Emote source toggles. All on by default; disabling a provider makes
+    /// its emojis vanish from rendered messages entirely.
+    #[serde(default)]
+    pub emotes: EmotesConfig,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+/// Per-provider emote switches, all enabled by default.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct EmotesConfig {
+    /// First-party Twitch emotes (rendered from per-message ranges).
+    #[serde(default = "default_true")]
+    pub twitch: bool,
+    /// Native unicode emoji characters. `false` strips them from text.
+    #[serde(default = "default_true")]
+    pub unicode: bool,
+    /// 7TV global + channel sets.
+    #[serde(default = "default_true")]
+    pub seventv: bool,
+    /// BetterTTV global + channel/shared sets.
+    #[serde(default = "default_true")]
+    pub bttv: bool,
+    /// FrankerFaceZ global + room sets.
+    #[serde(default = "default_true")]
+    pub ffz: bool,
+}
+
+impl Default for EmotesConfig {
+    fn default() -> Self {
+        Self {
+            twitch: true,
+            unicode: true,
+            seventv: true,
+            bttv: true,
+            ffz: true,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]

@@ -7,7 +7,7 @@
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 
-use crate::config::ChatConfig;
+use crate::config::{ChatConfig, EmotesConfig};
 
 /// The subset of config that can change at runtime (everything except
 /// things that only matter at process start).
@@ -18,6 +18,8 @@ pub struct LiveConfig {
     pub channel: String,
     pub creds: Option<(String, String)>,
     pub theme: crate::config::ThemeConfig,
+    /// Emote source toggles; widget-facing via meta.
+    pub emotes: EmotesConfig,
 }
 
 impl From<&ChatConfig> for LiveConfig {
@@ -32,6 +34,7 @@ impl From<&ChatConfig> for LiveConfig {
                 .clone()
                 .zip(cfg.twitch.client_secret.clone()),
             theme: cfg.theme.clone(),
+            emotes: cfg.emotes.clone(),
         }
     }
 }
@@ -76,7 +79,8 @@ pub fn planned_actions(old: &LiveConfig, new: &LiveConfig) -> Vec<Action> {
         // The 7TV emote set is per-channel.
         out.push(Action::RefreshEmotes);
     }
-    let mut broadcast_meta = old.theme != new.theme;
+    // Emote toggles are widget-facing only (maps always serve fully).
+    let mut broadcast_meta = old.theme != new.theme || old.emotes != new.emotes;
     if old.creds != new.creds {
         out.push(Action::RefreshBadges);
         // Channel change above already scheduled an emote refresh.
@@ -98,7 +102,7 @@ pub fn planned_actions(old: &LiveConfig, new: &LiveConfig) -> Vec<Action> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::ThemeConfig;
+    use crate::config::{EmotesConfig, ThemeConfig};
 
     /// Hand-built live views; ground truth per case is written inline.
     fn live(
@@ -122,6 +126,7 @@ mod tests {
                 custom_css: None,
                 role_css: None,
             },
+            emotes: EmotesConfig::default(),
         }
     }
 
