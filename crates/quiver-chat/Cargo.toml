@@ -31,6 +31,7 @@ lightningcss = { workspace = true }
 notify = { workspace = true }
 notify-debouncer-full = { workspace = true }
 tokio-util = { workspace = true }
+reqwest = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }

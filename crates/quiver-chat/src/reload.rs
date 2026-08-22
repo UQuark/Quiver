@@ -26,6 +26,7 @@ pub(crate) struct ReloadCtx {
     pub messages: crate::engine::SharedState,
     pub tx: tokio::sync::broadcast::Sender<String>,
     pub badges: SharedBadges,
+    pub emotes: crate::emotes::SharedEmotes,
     pub feed_swap: mpsc::UnboundedSender<String>,
     pub fe_watch: mpsc::UnboundedSender<Option<PathBuf>>,
     pub rebind: Arc<Notify>,
@@ -326,6 +327,20 @@ async fn apply_action(ctx: &ReloadCtx, action: &Action, new_live: &LiveConfig) {
                 }
             }
         },
+        Action::RefreshEmotes => {
+            let map = crate::emotes::load_third_party_emotes(
+                new_live
+                    .creds
+                    .as_ref()
+                    .map(|(a, b)| (a.as_str(), b.as_str())),
+                &new_live.channel,
+            )
+            .await;
+            info!(emote_count = map.len(), "third-party emote map refreshed");
+            if let Ok(mut e) = ctx.emotes.write() {
+                *e = map;
+            }
+        }
         Action::BroadcastMeta => {
             // IMPORTANT: build from new_live, NOT ctx.live — during apply,
             // the shared slot still holds the OLD config (it is swapped in

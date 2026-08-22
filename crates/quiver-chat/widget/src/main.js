@@ -2,12 +2,41 @@
 // this page only draws what the WebSocket feed sends.
 // No build step: plain ES module served as-is by quiver-chat.
 
-const EMOTE_CDN = "https://static-cdn.jtvnw.net/emoticons/v2/{id}/default/dark/2.0.png";
+// Twitch retired v2 scale paths AND extensions don't exist on this CDN:
+// /emoticons/v1/{id}/2.0 is the live, id-stable pattern (verified 200s).
+const EMOTE_CDN = "https://static-cdn.jtvnw.net/emoticons/v1/{id}/2.0";
 
 let badgeUrls = {}; // "set_id/version" -> image url
 let maxMessages = 30;
 let roleCss = {}; // badge set id -> css snippet for message rows
+let thirdParty = {}; // emote name -> image url (7TV etc.), engine-provided
 const EXPIRE_FADE_MS = 350;
+
+// Third-party emotes arrive as bare words in text (no Twitch metadata).
+// The engine serves a merged {name: url} map; fetched once per page load.
+fetch("/emotes.json")
+  .then((r) => (r.ok ? r.json() : Promise.reject(r.status)))
+  .then((d) => {
+    thirdParty = d.emotes || {};
+    console.debug("[quiver] third-party emotes loaded:", Object.keys(thirdParty).length);
+  })
+  .catch((e) => console.debug("[quiver] no third-party emotes:", e));
+
+function appendTokens(wrap, text) {
+  for (const part of text.split(/(\s+)/)) {
+    if (!part) continue;
+    const url = /^\s+$/.test(part) ? null : thirdParty[part];
+    if (url) {
+      const img = document.createElement("img");
+      img.className = "emote";
+      img.src = url;
+      img.alt = part;
+      wrap.append(img);
+    } else {
+      wrap.append(document.createTextNode(part));
+    }
+  }
+}
 function el(tag, cls, text) {
   const node = document.createElement(tag);
   if (cls) node.className = cls;
@@ -36,7 +65,7 @@ function renderText(m) {
   let cursor = 0;
   for (const e of emotes) {
     if (e.start < cursor || e.end > m.text.length) continue; // malformed range
-    if (e.start > cursor) wrap.append(document.createTextNode(m.text.slice(cursor, e.start)));
+    if (e.start > cursor) appendTokens(wrap, m.text.slice(cursor, e.start));
     const img = document.createElement("img");
     img.className = "emote";
     img.src = EMOTE_CDN.replace("{id}", encodeURIComponent(e.id));
@@ -44,7 +73,7 @@ function renderText(m) {
     wrap.append(img);
     cursor = e.end;
   }
-  if (cursor < m.text.length) wrap.append(document.createTextNode(m.text.slice(cursor)));
+  if (cursor < m.text.length) appendTokens(wrap, m.text.slice(cursor));
   return wrap;
 }
 

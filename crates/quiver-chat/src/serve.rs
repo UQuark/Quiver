@@ -38,6 +38,7 @@ pub(crate) struct AppState {
     pub messages: engine::SharedState,
     pub tx: broadcast::Sender<String>,
     pub badges: SharedBadges,
+    pub emotes: crate::emotes::SharedEmotes,
     /// Generation token: cancelled on rebind/shutdown so WS handlers
     /// return instead of blocking graceful drain forever.
     pub ws_token: CancellationToken,
@@ -77,6 +78,16 @@ pub async fn run(cfg: ChatConfig, config_path: PathBuf) -> anyhow::Result<()> {
     info!(badge_count = initial_badges.len(), "badge map ready");
     let badges: SharedBadges = Arc::new(RwLock::new(initial_badges));
 
+    let initial_emotes = crate::emotes::load_third_party_emotes(
+        cfg.twitch
+            .client_id
+            .as_deref()
+            .zip(cfg.twitch.client_secret.as_deref()),
+        &cfg.twitch.channel,
+    )
+    .await;
+    let emotes: crate::emotes::SharedEmotes = Arc::new(RwLock::new(initial_emotes));
+
     let quit = CancellationToken::new();
     let rebind = Arc::new(Notify::new());
 
@@ -107,6 +118,7 @@ pub async fn run(cfg: ChatConfig, config_path: PathBuf) -> anyhow::Result<()> {
         badges: badges.clone(),
         feed_swap: feed.swap_tx,
         fe_watch: fe_watch_tx,
+        emotes: emotes.clone(),
         rebind: rebind.clone(),
     };
     crate::reload::spawn_watcher(config_path, ctx, quit.clone());
@@ -131,6 +143,7 @@ pub async fn run(cfg: ChatConfig, config_path: PathBuf) -> anyhow::Result<()> {
             messages: messages.clone(),
             tx: tx.clone(),
             badges: badges.clone(),
+            emotes: emotes.clone(),
             ws_token,
         });
 
@@ -182,6 +195,17 @@ fn router(state: AppState) -> Router {
     Router::new()
         .route("/ws", get(ws_handler))
         .route("/health", get(|| async { "ok" }))
+        .route(
+            "/emotes.json",
+            get(|State(state): State<AppState>| async move {
+                let map = state.emotes.read().map(|m| m.clone()).unwrap_or_default();
+                (
+                    [(header::CONTENT_TYPE, "application/json")],
+                    [(header::CACHE_CONTROL, "no-cache")],
+                    serde_json::json!({ "emotes": map }).to_string(),
+                )
+            }),
+        )
         .fallback(get(static_fallback))
         .with_state(state)
 }

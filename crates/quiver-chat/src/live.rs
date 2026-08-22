@@ -49,6 +49,8 @@ pub enum Action {
     SetWidgetDist(Option<PathBuf>),
     /// Credentials changed — refetch the badge URL map.
     RefreshBadges,
+    /// Channel or credentials changed — third-party emote set differs.
+    RefreshEmotes,
     /// Push fresh meta (theme/badges/custom_css) to connected clients.
     BroadcastMeta,
     /// Bind address changed — restart the HTTP listener.
@@ -58,8 +60,8 @@ pub enum Action {
 /// Pure diff between two live views → ordered action list.
 ///
 /// Canonical order (tested): SetMax → SetWidgetDist → SwapChannel →
-/// RefreshBadges → BroadcastMeta → Rebind. Rebind runs last so everything
-/// else settles before the listener moves.
+/// RefreshEmotes → RefreshBadges → BroadcastMeta → Rebind. Rebind runs
+/// last so everything else settles before the listener moves.
 pub fn planned_actions(old: &LiveConfig, new: &LiveConfig) -> Vec<Action> {
     let mut out = Vec::new();
 
@@ -71,10 +73,16 @@ pub fn planned_actions(old: &LiveConfig, new: &LiveConfig) -> Vec<Action> {
     }
     if old.channel != new.channel {
         out.push(Action::SwapChannel(new.channel.clone()));
+        // The 7TV emote set is per-channel.
+        out.push(Action::RefreshEmotes);
     }
     let mut broadcast_meta = old.theme != new.theme;
     if old.creds != new.creds {
         out.push(Action::RefreshBadges);
+        // Channel change above already scheduled an emote refresh.
+        if !out.contains(&Action::RefreshEmotes) {
+            out.push(Action::RefreshEmotes);
+        }
         // Badge URLs live in meta, so a credential swap implies re-push.
         broadcast_meta = true;
     }
@@ -146,7 +154,10 @@ mod tests {
         let b = live("a:1", None, "two", Some("id"), 18, 30, 60);
         assert_eq!(
             planned_actions(&a, &b),
-            vec![Action::SwapChannel("two".to_string())]
+            vec![
+                Action::SwapChannel("two".to_string()),
+                Action::RefreshEmotes,
+            ]
         );
     }
 
@@ -156,7 +167,11 @@ mod tests {
         let b = live("a:1", None, "chan", Some("id2"), 18, 30, 60);
         assert_eq!(
             planned_actions(&a, &b),
-            vec![Action::RefreshBadges, Action::BroadcastMeta]
+            vec![
+                Action::RefreshBadges,
+                Action::RefreshEmotes,
+                Action::BroadcastMeta,
+            ]
         );
     }
 
@@ -202,6 +217,7 @@ mod tests {
                 Action::SetMax(40),
                 Action::SetWidgetDist(Some(PathBuf::from("/x"))),
                 Action::SwapChannel("two".to_string()),
+                Action::RefreshEmotes,
                 Action::RefreshBadges,
                 Action::BroadcastMeta,
                 Action::Rebind,
