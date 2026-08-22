@@ -11,53 +11,16 @@ use quiver_config::{Validate, ValidationIssue, require};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-/// Sample config printed by `--sample-config`.
-pub const SAMPLE_CONFIG: &str = r#"// quiver-chat configuration. RON format, verbose on purpose.
-(
-    server: (
-        // Address the widget server listens on. OBS browser source points here.
-        listen: "127.0.0.1:4783",
-        // Optional: absolute path to the widget frontend directory
-        // (crates/quiver-chat/widget). No build step needed.
-        // widget_dist: "/absolute/path/to/crates/quiver-chat/widget",
-    ),
-    twitch: (
-        // Channel login to read chat from (anonymous, read-only).
-        channel: "your_channel_here",
-        // Optional Twitch API credentials — enable badge image URLs.
-        // Keep secrets out of version control (*.local.ron is git-ignored).
-        // client_id: "your_client_id",
-        // client_secret: "your_client_secret",
-    ),
-    // Emote sources — all enabled by default; false removes that
-    // provider's emojis (or unicode emoji characters) from messages.
-    // emotes: (
-    //     twitch: true, unicode: true, seventv: true, bttv: true, ffz: true,
-    // ),
-    theme: (
-        font_size_px: 18,
-        max_messages: 30,
-        message_lifetime_secs: 60,
-        // Optional: your own CSS on top of the built-in styles.
-        // Author it as a RON RAW STRING so quotes and newlines need no
-        // escaping (raw strings open with r followed by hashes and a
-        // double-quote; see ThemeConfig docs).
-        // custom_css: Some("/* example */ .msg { opacity: 0.9; }"),
-        // Optional per-role CSS keyed by Twitch badge id (a RON map:
-        // brace braces, quoted keys). Message rows get role-<id> classes;
-        // snippets inject before custom_css.
-        // role_css: Some({
-        //     "moderator": ".msg { background: rgba(0,0,0,.35); }",
-        //     "broadcaster": ".msg { border-left: 3px solid red; }",
-        // }),
-    ),
-)
-"#;
-
+/// quiver-chat configuration. Verbose on purpose: this file IS the
+/// tool's interface. The future Quiver UI generates files of this shape
+/// from the JSON Schema exported via `quiver-chat --print-schema`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct ChatConfig {
+    /// HTTP server and widget frontend location.
     pub server: ServerConfig,
+    /// Twitch chat source and optional API credentials.
     pub twitch: TwitchConfig,
+    /// Visual appearance of rendered messages.
     pub theme: ThemeConfig,
     /// Emote source toggles. All on by default; disabling a provider makes
     /// its emojis vanish from rendered messages entirely.
@@ -101,6 +64,27 @@ impl Default for EmotesConfig {
     }
 }
 
+impl Default for ServerConfig {
+    fn default() -> Self {
+        Self {
+            listen: "127.0.0.1:4783".to_string(),
+            // Relative to where quiver-chat runs — works out of the box
+            // from the monorepo root.
+            widget_dist: Some(PathBuf::from("crates/quiver-chat/widget")),
+        }
+    }
+}
+
+impl Default for TwitchConfig {
+    fn default() -> Self {
+        Self {
+            channel: "your_channel_here".to_string(),
+            client_id: None,
+            client_secret: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct ServerConfig {
     /// `host:port` the widget HTTP+WS server binds to.
@@ -125,8 +109,11 @@ pub struct TwitchConfig {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct ThemeConfig {
+    /// Base font size for messages, in CSS pixels.
     pub font_size_px: u32,
+    /// Maximum number of messages kept in the visible history.
     pub max_messages: u32,
+    /// Seconds a message stays visible before fading out.
     pub message_lifetime_secs: u64,
     /// Your own CSS, applied after the built-in widget styles. Authored as
     /// a RON raw string so newlines and quotes stay untouched.
@@ -170,6 +157,29 @@ pub(crate) fn report_css_lint(css: Option<&str>, role_css: Option<&HashMap<Strin
                     "role_css snippet looks broken — browsers will ignore invalid rules"
                 );
             }
+        }
+    }
+}
+
+impl Default for ThemeConfig {
+    fn default() -> Self {
+        Self {
+            font_size_px: 18,
+            max_messages: 30,
+            message_lifetime_secs: 60,
+            custom_css: None,
+            role_css: None,
+        }
+    }
+}
+
+impl Default for ChatConfig {
+    fn default() -> Self {
+        Self {
+            server: ServerConfig::default(),
+            twitch: TwitchConfig::default(),
+            theme: ThemeConfig::default(),
+            emotes: EmotesConfig::default(),
         }
     }
 }

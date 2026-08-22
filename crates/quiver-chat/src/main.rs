@@ -6,7 +6,7 @@
 use std::path::PathBuf;
 
 use clap::Parser;
-use quiver_chat::config::{ChatConfig, SAMPLE_CONFIG};
+use quiver_chat::config::ChatConfig;
 use quiver_config::{Validate, load_from_path, write_schema};
 
 #[derive(Debug, Parser)]
@@ -40,7 +40,10 @@ fn main() -> anyhow::Result<()> {
     init_tracing();
 
     if args.sample_config {
-        print!("{SAMPLE_CONFIG}");
+        let generated =
+            quiver_config::generate_default::<ChatConfig>("quiver-chat --sample-config")
+                .map_err(|e| anyhow::anyhow!("generation failed: {e}"))?;
+        print!("{generated}");
         return Ok(());
     }
 

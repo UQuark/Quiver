@@ -1,16 +1,31 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "ChatConfig",
+  "description": "quiver-chat configuration. Verbose on purpose: this file IS the\ntool's interface. The future Quiver UI generates files of this shape\nfrom the JSON Schema exported via `quiver-chat --print-schema`.",
   "type": "object",
   "properties": {
     "server": {
+      "description": "HTTP server and widget frontend location.",
       "$ref": "#/$defs/ServerConfig"
     },
+    "twitch": {
+      "description": "Twitch chat source and optional API credentials.",
+      "$ref": "#/$defs/TwitchConfig"
+    },
     "theme": {
+      "description": "Visual appearance of rendered messages.",
       "$ref": "#/$defs/ThemeConfig"
     },
-    "twitch": {
-      "$ref": "#/$defs/TwitchConfig"
+    "emotes": {
+      "description": "Emote source toggles. All on by default; disabling a provider makes\nits emojis vanish from rendered messages entirely.",
+      "$ref": "#/$defs/EmotesConfig",
+      "default": {
+        "twitch": true,
+        "unicode": true,
+        "seventv": true,
+        "bttv": true,
+        "ffz": true
+      }
     }
   },
   "required": [
@@ -38,48 +53,6 @@
         "listen"
       ]
     },
-    "ThemeConfig": {
-      "type": "object",
-      "properties": {
-        "custom_css": {
-          "description": "Your own CSS, applied after the built-in widget styles. Authored as\na RON raw string so newlines and quotes stay untouched.\nParsed with lightningcss at load/reload; a parse error is reported\nas a warning but never blocks the tool.",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "font_size_px": {
-          "type": "integer",
-          "format": "uint32",
-          "minimum": 0
-        },
-        "max_messages": {
-          "type": "integer",
-          "format": "uint32",
-          "minimum": 0
-        },
-        "message_lifetime_secs": {
-          "type": "integer",
-          "format": "uint64",
-          "minimum": 0
-        },
-        "role_css": {
-          "description": "Per-role CSS: Twitch badge set id -> CSS snippet applied to messages\nwhose sender carries that badge. Message rows get `role-<id>` classes,\nsnippets are injected before custom_css. Common ids: broadcaster,\nmoderator, vip, subscriber, founder.",
-          "type": [
-            "object",
-            "null"
-          ],
-          "additionalProperties": {
-            "type": "string"
-          }
-        }
-      },
-      "required": [
-        "font_size_px",
-        "max_messages",
-        "message_lifetime_secs"
-      ]
-    },
     "TwitchConfig": {
       "type": "object",
       "properties": {
@@ -105,6 +78,82 @@
       "required": [
         "channel"
       ]
+    },
+    "ThemeConfig": {
+      "type": "object",
+      "properties": {
+        "font_size_px": {
+          "description": "Base font size for messages, in CSS pixels.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "max_messages": {
+          "description": "Maximum number of messages kept in the visible history.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "message_lifetime_secs": {
+          "description": "Seconds a message stays visible before fading out.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "custom_css": {
+          "description": "Your own CSS, applied after the built-in widget styles. Authored as\na RON raw string so newlines and quotes stay untouched.\nParsed with lightningcss at load/reload; a parse error is reported\nas a warning but never blocks the tool.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "role_css": {
+          "description": "Per-role CSS: Twitch badge set id -> CSS snippet applied to messages\nwhose sender carries that badge. Message rows get `role-<id>` classes,\nsnippets are injected before custom_css. Common ids: broadcaster,\nmoderator, vip, subscriber, founder.",
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "font_size_px",
+        "max_messages",
+        "message_lifetime_secs"
+      ]
+    },
+    "EmotesConfig": {
+      "description": "Per-provider emote switches, all enabled by default.",
+      "type": "object",
+      "properties": {
+        "twitch": {
+          "description": "First-party Twitch emotes (rendered from per-message ranges).",
+          "type": "boolean",
+          "default": true
+        },
+        "unicode": {
+          "description": "Native unicode emoji characters. `false` strips them from text.",
+          "type": "boolean",
+          "default": true
+        },
+        "seventv": {
+          "description": "7TV global + channel sets.",
+          "type": "boolean",
+          "default": true
+        },
+        "bttv": {
+          "description": "BetterTTV global + channel/shared sets.",
+          "type": "boolean",
+          "default": true
+        },
+        "ffz": {
+          "description": "FrankerFaceZ global + room sets.",
+          "type": "boolean",
+          "default": true
+        }
+      }
     }
   }
 }

@@ -1,7 +1,7 @@
 //! Integration tests for quiver-chat's config model.
 //! Ground truth is hand-written constants; no clever computation.
 
-use quiver_chat::config::{ChatConfig, SAMPLE_CONFIG};
+use quiver_chat::config::ChatConfig;
 use quiver_config::{Validate, load_from_path, parse_str, to_string};
 
 #[test]
@@ -24,8 +24,21 @@ fn valid_fixture_parses_and_validates_clean() {
 fn sample_config_parses_and_validates_clean() {
     // The printed sample must be usable as-is (minus channel rename):
     // "your_channel_here" is a valid login shape, so zero issues expected.
-    let cfg: ChatConfig = parse_str(SAMPLE_CONFIG).expect("sample must parse");
+    let text = quiver_config::generate_default::<ChatConfig>("quiver-chat --sample-config")
+        .expect("generation succeeds");
+    let cfg: ChatConfig = parse_str(&text).expect("generated must parse");
     assert_eq!(cfg.validate(), Vec::new());
+
+    // Discoverability contract: key doc comments must appear verbatim.
+    for needle in [
+        "host:port",
+        "Keep ONLY in git-ignored local configs",
+        "Base font size",
+        "role-<id> classes",
+        "strips them from text",
+    ] {
+        assert!(text.contains(needle), "missing doc fragment: {needle}");
+    }
 }
 
 #[test]
