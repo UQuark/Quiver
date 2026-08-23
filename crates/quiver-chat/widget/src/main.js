@@ -119,7 +119,7 @@ function renderMessage(m) {
   if (m.reply_to) {
     const header = el("div", "reply");
     header.append(
-      el("span", "reply-arrow", "↳"),
+      el("span", "reply-arrow", "↩"),
       el("span", "reply-user", m.reply_to.display_name),
       el("span", "reply-text", m.reply_to.text),
     );
