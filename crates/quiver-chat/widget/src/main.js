@@ -142,9 +142,6 @@ function renderMessage(m) {
   } else {
     row.append(el("span", "sep", ":"));
     row.append(renderText(m));
-  } else {
-    row.append(el("span", "sep", ":"));
-    row.append(renderText(m));
   }
   return row;
 }
