@@ -117,9 +117,11 @@ function renderMessage(m) {
 
   // Reply thread header: compact strip above the row content.
   if (m.reply_to) {
+    // Unified card: header + message share one background box.
+    row.classList.add("has-reply");
     const header = el("div", "reply");
     header.append(
-      el("span", "reply-arrow", "↱"),
+      el("span", "reply-arrow", "➚"),
       el("span", "reply-user", m.reply_to.display_name),
       el("span", "reply-text", m.reply_to.text),
     );

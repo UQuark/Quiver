@@ -21,6 +21,10 @@ body {
   align-items: baseline;
   word-break: break-word;
   animation: msg-in 180ms ease-out;
+  /* Every message is a card. Translucent so OBS scene shows through. */
+  background: rgba(28, 28, 33, 0.5);
+  border-radius: 6px;
+  padding: 5px 8px;
 }
 
 @keyframes msg-in {
@@ -90,15 +94,17 @@ body {
   font-size: 1.2em;
 }
 
-/* Reply thread header: full-width strip above the row content. */
+/* Reply thread header: full-width strip inside the message card.
+   (.has-reply carries no unique styles anymore — the card look comes
+   from .msg base; the class remains a customization hook.) */
 .reply {
   flex-basis: 100%; /* force own line inside the flex row */
   display: flex;
   gap: 4px;
   align-items: baseline;
-  background: #2a2a2e; /* gray strip — override via custom_css */
+  background: rgba(42, 42, 46, 0.5); /* inner strip, slightly lighter */
   border-radius: 3px;
-  padding: 1px 6px;
+  padding: 2px 6px;
   font-size: 0.82em;
   opacity: 0.85;
   overflow: hidden;
