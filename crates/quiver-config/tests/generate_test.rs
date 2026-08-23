@@ -67,6 +67,8 @@ fn generated_output_matches_hand_written_golden() {
 )
 ";
 
+    // On drift this prints raw left/right — readable enough for one line
+    // of divergence; anything subtler gets diagnosed, not tooling-built.
     assert_eq!(out, expected);
 }
 

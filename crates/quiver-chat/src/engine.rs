@@ -9,6 +9,7 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use crate::filters::MsgKind;
 use quiver_twitch::{
     Badge, ChatMessage, EmoteRef, Event, GiftSubEvent, MysteryGiftEvent, RaidEvent, SubEvent,
 };
@@ -252,6 +253,32 @@ impl EngineState {
 /// Shared handle used by the server and the pump task.
 pub type SharedState = Arc<Mutex<EngineState>>;
 
+/// Single filter decision point for the pump. No compiled filters = pass.
+fn permitted(
+    filters: &crate::filters::SharedCompiled,
+    kind: MsgKind,
+    login: &str,
+    display_name: &str,
+    user_id: &str,
+    badges: &[Badge],
+    content: &str,
+) -> bool {
+    let Ok(guard) = filters.read() else {
+        return true; // poisoned lock: fail-open rather than drop chat
+    };
+    match guard.as_ref() {
+        Some(f) => f.permits(&crate::filters::PermitCtx {
+            kind,
+            login,
+            display_name,
+            user_id,
+            badges,
+            content,
+        }),
+        None => true,
+    }
+}
+
 fn send_event<E: Into<WireEvent>>(tx: &tokio::sync::broadcast::Sender<String>, ev: E) {
     let wire: WireEvent = ev.into();
     let frame = serde_json::json!({ "type": "event", "event": wire });
@@ -269,6 +296,7 @@ pub async fn pump(
     live: crate::live::SharedLive,
     state: SharedState,
     tx: tokio::sync::broadcast::Sender<String>,
+    filters: crate::filters::SharedCompiled,
     source: &mut quiver_twitch::IrcChatSource,
 ) {
     let mut ticker = tokio::time::interval(Duration::from_secs(1));
@@ -286,6 +314,16 @@ pub async fn pump(
                     if cm.channel_login != expected_channel {
                         continue; // straggler from a swapped-away channel
                     }
+                    let kind = {
+                        let guard = filters.read().unwrap();
+                        guard
+                            .as_ref()
+                            .map(|f| f.classify_chat(&cm.text))
+                            .unwrap_or(MsgKind::Message)
+                    };
+                    if !permitted(&filters, kind, &cm.user_login, &cm.display_name, &cm.user_id, &cm.badges, &cm.text) {
+                        continue; // filtered: never reaches history or clients
+                    }
                     let rendered = RenderedMessage::from(cm);
                     let evicted = state.lock().map(|mut st| st.push(rendered.clone())).unwrap_or_default();
                     let frame = serde_json::json!({ "type": "message", "message": rendered });
@@ -295,10 +333,26 @@ pub async fn pump(
                         let _ = tx.send(frame.to_string());
                     }
                 }
-                Some(Event::Sub(s)) => send_event(&tx, s),
-                Some(Event::GiftSub(g)) => send_event(&tx, g),
-                Some(Event::MysteryGift(m)) => send_event(&tx, m),
-                Some(Event::Raid(r)) => send_event(&tx, r),
+                Some(Event::Sub(s)) => {
+                    if permitted(&filters, MsgKind::Sub, &s.user_login, &s.display_name, "", &[], "") {
+                        send_event(&tx, s);
+                    }
+                }
+                Some(Event::GiftSub(g)) => {
+                    if permitted(&filters, MsgKind::GiftSub, &g.recipient_login, &g.recipient_display_name, "", &[], "") {
+                        send_event(&tx, g);
+                    }
+                }
+                Some(Event::MysteryGift(m)) => {
+                    if permitted(&filters, MsgKind::MysteryGift, "", "", "", &[], "") {
+                        send_event(&tx, m);
+                    }
+                }
+                Some(Event::Raid(r)) => {
+                    if permitted(&filters, MsgKind::Raid, &r.from_login, &r.from_display_name, "", &[], "") {
+                        send_event(&tx, r);
+                    }
+                }
                 Some(_) => {}
             },
             _ = ticker.tick() => {
@@ -446,6 +500,7 @@ mod tests {
         let cm = ChatMessage {
             id: "m1".into(),
             channel_login: "chan".into(),
+            user_id: "77".into(),
             user_login: "user".into(),
             display_name: "User".into(),
             color: Some("#123456".into()),

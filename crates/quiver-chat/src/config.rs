@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 /// quiver-chat configuration. Verbose on purpose: this file IS the
 /// tool's interface. The future Quiver UI generates files of this shape
 /// from the JSON Schema exported via `quiver-chat --print-schema`.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, Default)]
 pub struct ChatConfig {
     /// HTTP server and widget frontend location.
     pub server: ServerConfig,
@@ -26,6 +26,10 @@ pub struct ChatConfig {
     /// its emojis vanish from rendered messages entirely.
     #[serde(default)]
     pub emotes: EmotesConfig,
+    /// Message filtering (allowlist/denylist per dimension). Absent = no
+    /// filtering at all.
+    #[serde(default)]
+    pub filters: FiltersConfig,
 }
 
 fn default_true() -> bool {
@@ -173,15 +177,69 @@ impl Default for ThemeConfig {
     }
 }
 
-impl Default for ChatConfig {
+/// Filter list direction. Allowlist = at least one item must match;
+/// denylist = no item may match. An EMPTY item list makes the whole
+/// dimension inactive (an empty allowlist meaning "drop everything"
+/// is a footgun we refuse to arm).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum Mode {
+    Allowlist,
+    Denylist,
+}
+
+/// One filter dimension: a direction plus its string items.
+/// Item interpretation depends on the dimension (regex / exact id /
+/// kind name / badge id) — see `FiltersConfig` field docs.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ListFilter {
+    pub mode: Mode,
+    pub items: Vec<String>,
+}
+
+fn default_command_prefixes() -> Vec<String> {
+    vec!["!".to_string()]
+}
+
+// MANUAL Default: derived Default would ignore the serde field default and
+// produce empty prefixes — inconsistent with parsed configs AND with what
+// generate_default emits.
+impl Default for FiltersConfig {
     fn default() -> Self {
         Self {
-            server: ServerConfig::default(),
-            twitch: TwitchConfig::default(),
-            theme: ThemeConfig::default(),
-            emotes: EmotesConfig::default(),
+            command_prefixes: default_command_prefixes(),
+            display_name: None,
+            username: None,
+            user_id: None,
+            content: None,
+            message_type: None,
+            role: None,
         }
     }
+}
+
+/// Message filtering rules. Dimensions combine with AND: a message is
+/// rendered only when EVERY active dimension passes.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct FiltersConfig {
+    /// Prefixes that mark a chat message as the `command` kind
+    /// (first match wins). Default: ["!"].
+    #[serde(default = "default_command_prefixes")]
+    pub command_prefixes: Vec<String>,
+    /// Regex matched against the sender's display name.
+    pub display_name: Option<ListFilter>,
+    /// Regex matched against the sender's login name (always lowercase).
+    pub username: Option<ListFilter>,
+    /// EXACT match against the sender's Twitch user id (numeric string).
+    pub user_id: Option<ListFilter>,
+    /// Regex matched against the message text. Events have empty text.
+    pub content: Option<ListFilter>,
+    /// Message kind names: message | command | sub | gift_sub |
+    /// mystery_gift | raid. Unknown names are config errors.
+    pub message_type: Option<ListFilter>,
+    /// Badge ids carried by the sender — same vocabulary as role_css
+    /// (moderator, vip, subscriber, ...). Events carry no badges in v1.
+    pub role: Option<ListFilter>,
 }
 
 impl Validate for ChatConfig {
@@ -238,6 +296,46 @@ impl Validate for ChatConfig {
             "must be at least 1",
             &mut out,
         );
+
+        // Filters: regex patterns must compile; kind names must be real.
+        // A broken filter is functional, not cosmetic — these are hard
+        // validation errors, unlike advisory CSS lint.
+        let f = &self.filters;
+        require(
+            f.command_prefixes.iter().all(|p| !p.is_empty()),
+            "filters.command_prefixes",
+            "prefixes must not be empty strings",
+            &mut out,
+        );
+        for (name, dim) in [
+            ("display_name", &f.display_name),
+            ("username", &f.username),
+            ("content", &f.content),
+        ] {
+            if let Some(dim) = dim {
+                for item in &dim.items {
+                    if let Err(e) = regex::Regex::new(item) {
+                        out.push(ValidationIssue {
+                            path: format!("filters.{name}.items"),
+                            message: format!("invalid regex {item:?}: {e}"),
+                        });
+                    }
+                }
+            }
+        }
+        if let Some(dim) = &f.message_type {
+            for item in &dim.items {
+                if crate::filters::MsgKind::parse(item).is_none() {
+                    out.push(ValidationIssue {
+                        path: "filters.message_type.items".to_string(),
+                        message: format!(
+                            "unknown message kind {item:?} — expected one of: \
+                             message, command, sub, gift_sub, mystery_gift, raid"
+                        ),
+                    });
+                }
+            }
+        }
 
         out
     }

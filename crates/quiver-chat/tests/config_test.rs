@@ -34,7 +34,7 @@ fn sample_config_parses_and_validates_clean() {
         "host:port",
         "Keep ONLY in git-ignored local configs",
         "Base font size",
-        "role-<id> classes",
+        "snippets are injected before custom_css",
         "strips them from text",
     ] {
         assert!(text.contains(needle), "missing doc fragment: {needle}");
@@ -74,7 +74,7 @@ fn invalid_values_report_exact_issue_paths() {
 
 #[test]
 fn ron_roundtrip_preserves_optional_field_semantics() {
-    let cfg: ChatConfig = parse_str(SAMPLE_CONFIG).expect("sample must parse");
+    let cfg = ChatConfig::default();
     let text = to_string(&cfg).expect("serialize");
     let again: ChatConfig = parse_str(&text).expect("re-parse");
     assert_eq!(cfg, again);

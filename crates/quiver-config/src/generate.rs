@@ -171,20 +171,17 @@ fn emit_field(
     indent: usize,
     path: &str,
 ) -> Result<(), GenerateError> {
+    // NOTE: schemars 1.x places FIELD doc comments on the property node
+    // itself, next to any $ref (not on the $defs entry) — read the
+    // description BEFORE resolving.
     if let Some(desc) = description(field_schema) {
         push_comment(out, indent, &desc);
     }
+    let resolved = resolve_ref(field_schema, defs);
     push_indent(out, indent);
     out.push_str(key);
     out.push_str(": ");
-    emit_value(
-        out,
-        value,
-        resolve_ref(field_schema, defs),
-        defs,
-        indent,
-        &format!("{path}.{key}"),
-    )?;
+    emit_value(out, value, resolved, defs, indent, path)?;
     out.push_str(",\n");
     Ok(())
 }
@@ -192,18 +189,17 @@ fn emit_field(
 /// Nullability detection: schemars renders Option<T> fields as either
 /// `"type": ["T","null"]` or anyOf [T, null] depending on version shape.
 fn is_nullable(schema_node: &serde_json::Value) -> bool {
-    if let Some(types) = schema_node.get("type").and_then(|v| v.as_array()) {
-        if types.iter().any(|t| t.as_str() == Some("null")) {
-            return true;
-        }
+    if let Some(types) = schema_node.get("type").and_then(|v| v.as_array())
+        && types.iter().any(|t| t.as_str() == Some("null"))
+    {
+        return true;
     }
-    if let Some(any_of) = schema_node.get("anyOf").and_then(|v| v.as_array()) {
-        if any_of
+    if let Some(any_of) = schema_node.get("anyOf").and_then(|v| v.as_array())
+        && any_of
             .iter()
             .any(|s| s.get("type").and_then(|t| t.as_str()) == Some("null"))
-        {
-            return true;
-        }
+    {
+        return true;
     }
     false
 }
@@ -262,6 +258,9 @@ fn emit_value(
                 // expose the full interface for discoverability.
                 out.push_str("(\n");
                 for (key, field_schema) in props {
+                    // Pass the UNRESOLVED property node: descriptions sit
+                    // next to $ref on the property itself; emit_field
+                    // resolves for the value emission.
                     let resolved_field = resolve_ref(field_schema, defs);
                     let val = match map.get(key) {
                         Some(v) => v,
@@ -275,7 +274,7 @@ fn emit_value(
                             &serde_json::Value::Null
                         }
                     };
-                    emit_field(out, key, val, resolved_field, defs, indent + 1, path)?;
+                    emit_field(out, key, val, field_schema, defs, indent + 1, path)?;
                 }
                 push_indent(out, indent);
                 out.push(')');

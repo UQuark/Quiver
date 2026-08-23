@@ -73,6 +73,7 @@ fn map_privmsg(pm: PrivmsgMessage) -> ChatMessage {
     ChatMessage {
         id: pm.message_id,
         channel_login: pm.channel_login,
+        user_id: pm.sender.id,
         user_login: pm.sender.login,
         display_name: pm.sender.name,
         color: pm.name_color.map(|c| c.to_string()),
@@ -190,6 +191,7 @@ mod tests {
 
         assert_eq!(cm.id, "abc-123");
         assert_eq!(cm.channel_login, "quiverdev");
+        assert_eq!(cm.user_id, "29803735");
         assert_eq!(cm.user_login, "quiverdev");
         assert_eq!(cm.display_name, "QuiverDev");
         assert_eq!(cm.color.as_deref(), Some("#FF0000"));

@@ -25,9 +25,10 @@ pub struct EmoteRef {
 pub struct ChatMessage {
     pub id: String,
     pub channel_login: String,
+    /// Twitch numeric user id (stable across renames).
+    pub user_id: String,
     pub user_login: String,
     pub display_name: String,
-    /// User-chosen name color as `#RRGGBB`, or None if unset.
     pub color: Option<String>,
     pub badges: Vec<Badge>,
     pub emotes: Vec<EmoteRef>,

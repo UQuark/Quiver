@@ -20,6 +20,8 @@ pub struct LiveConfig {
     pub theme: crate::config::ThemeConfig,
     /// Emote source toggles; widget-facing via meta.
     pub emotes: EmotesConfig,
+    /// Message filtering rules; engine-facing.
+    pub filters: crate::config::FiltersConfig,
 }
 
 impl From<&ChatConfig> for LiveConfig {
@@ -35,6 +37,7 @@ impl From<&ChatConfig> for LiveConfig {
                 .zip(cfg.twitch.client_secret.clone()),
             theme: cfg.theme.clone(),
             emotes: cfg.emotes.clone(),
+            filters: cfg.filters.clone(),
         }
     }
 }
@@ -54,6 +57,8 @@ pub enum Action {
     RefreshBadges,
     /// Channel or credentials changed — third-party emote set differs.
     RefreshEmotes,
+    /// Filtering rules changed — recompile engine matchers.
+    ApplyFilters,
     /// Push fresh meta (theme/badges/custom_css) to connected clients.
     BroadcastMeta,
     /// Bind address changed — restart the HTTP listener.
@@ -89,6 +94,9 @@ pub fn planned_actions(old: &LiveConfig, new: &LiveConfig) -> Vec<Action> {
         }
         // Badge URLs live in meta, so a credential swap implies re-push.
         broadcast_meta = true;
+    }
+    if old.filters != new.filters {
+        out.push(Action::ApplyFilters);
     }
     if broadcast_meta {
         out.push(Action::BroadcastMeta);
@@ -127,6 +135,7 @@ mod tests {
                 role_css: None,
             },
             emotes: EmotesConfig::default(),
+            filters: crate::config::FiltersConfig::default(),
         }
     }
 

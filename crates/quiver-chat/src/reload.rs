@@ -27,6 +27,7 @@ pub(crate) struct ReloadCtx {
     pub tx: tokio::sync::broadcast::Sender<String>,
     pub badges: SharedBadges,
     pub emotes: crate::emotes::SharedEmotes,
+    pub filters: crate::filters::SharedCompiled,
     pub feed_swap: mpsc::UnboundedSender<String>,
     pub fe_watch: mpsc::UnboundedSender<Option<PathBuf>>,
     pub rebind: Arc<Notify>,
@@ -171,6 +172,17 @@ async fn apply_reload(path: &Path, ctx: &ReloadCtx) {
             channel = %ch,
             error = %e,
             "config reload rejected (invalid channel login) — keeping current config"
+        );
+        return;
+    }
+    // Same contract for filters: a pattern that cannot compile rejects the
+    // whole reload — moderation must never silently stop working.
+    if actions.contains(&Action::ApplyFilters)
+        && let Err(e) = crate::filters::CompiledFilters::compile(&new_live.filters)
+    {
+        warn!(
+            error = %e,
+            "config reload rejected (filters failed to compile) — keeping current config"
         );
         return;
     }
@@ -341,6 +353,15 @@ async fn apply_action(ctx: &ReloadCtx, action: &Action, new_live: &LiveConfig) {
                 *e = map;
             }
         }
+        Action::ApplyFilters => match crate::filters::CompiledFilters::compile(&new_live.filters) {
+            Ok(f) => {
+                if let Ok(mut g) = ctx.filters.write() {
+                    *g = Some(f);
+                }
+                info!("filters applied");
+            }
+            Err(e) => warn!(error = %e, "filter compile failed at apply — keeping old filters"),
+        },
         Action::BroadcastMeta => {
             // IMPORTANT: build from new_live, NOT ctx.live — during apply,
             // the shared slot still holds the OLD config (it is swapped in

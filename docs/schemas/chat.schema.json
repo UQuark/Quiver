@@ -26,6 +26,21 @@
         "bttv": true,
         "ffz": true
       }
+    },
+    "filters": {
+      "description": "Message filtering (allowlist/denylist per dimension). Absent = no\nfiltering at all.",
+      "$ref": "#/$defs/FiltersConfig",
+      "default": {
+        "command_prefixes": [
+          "!"
+        ],
+        "display_name": null,
+        "username": null,
+        "user_id": null,
+        "content": null,
+        "message_type": null,
+        "role": null
+      }
     }
   },
   "required": [
@@ -154,6 +169,115 @@
           "default": true
         }
       }
+    },
+    "FiltersConfig": {
+      "description": "Message filtering rules. Dimensions combine with AND: a message is\nrendered only when EVERY active dimension passes.",
+      "type": "object",
+      "properties": {
+        "command_prefixes": {
+          "description": "Prefixes that mark a chat message as the `command` kind\n(first match wins). Default: [\"!\"].",
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "!"
+          ]
+        },
+        "display_name": {
+          "description": "Regex matched against the sender's display name.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ListFilter"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "username": {
+          "description": "Regex matched against the sender's login name (always lowercase).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ListFilter"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "user_id": {
+          "description": "EXACT match against the sender's Twitch user id (numeric string).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ListFilter"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "content": {
+          "description": "Regex matched against the message text. Events have empty text.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ListFilter"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "message_type": {
+          "description": "Message kind names: message | command | sub | gift_sub |\nmystery_gift | raid. Unknown names are config errors.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ListFilter"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "role": {
+          "description": "Badge ids carried by the sender — same vocabulary as role_css\n(moderator, vip, subscriber, ...). Events carry no badges in v1.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ListFilter"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "ListFilter": {
+      "description": "One filter dimension: a direction plus its string items.\nItem interpretation depends on the dimension (regex / exact id /\nkind name / badge id) — see `FiltersConfig` field docs.",
+      "type": "object",
+      "properties": {
+        "mode": {
+          "$ref": "#/$defs/Mode"
+        },
+        "items": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "mode",
+        "items"
+      ]
+    },
+    "Mode": {
+      "description": "Filter list direction. Allowlist = at least one item must match;\ndenylist = no item may match. An EMPTY item list makes the whole\ndimension inactive (an empty allowlist meaning \"drop everything\"\nis a footgun we refuse to arm).",
+      "type": "string",
+      "enum": [
+        "allowlist",
+        "denylist"
+      ]
     }
   }
 }

@@ -101,7 +101,14 @@ pub async fn run(cfg: ChatConfig, config_path: PathBuf) -> anyhow::Result<()> {
         });
     }
 
-    let feed = spawn_feed(live.clone(), messages.clone(), tx.clone());
+    // Fail-closed honesty: a filter that cannot compile must never boot a
+    // tool that silently moderates nothing. (validate() already rejects
+    // broken patterns; this is the belt to those suspenders.)
+    let compiled_filters = crate::filters::CompiledFilters::compile(&cfg.filters)
+        .map_err(|e| anyhow::anyhow!("filters failed to compile: {e}"))?;
+    let filters: crate::filters::SharedCompiled = Arc::new(RwLock::new(Some(compiled_filters)));
+
+    let feed = spawn_feed(live.clone(), messages.clone(), tx.clone(), filters.clone());
 
     // Frontend hot reload: watch the widget dir, push {type:reload} frames.
     let (fe_watch_tx, fe_watch_rx) = tokio::sync::mpsc::unbounded_channel::<Option<PathBuf>>();
@@ -119,6 +126,7 @@ pub async fn run(cfg: ChatConfig, config_path: PathBuf) -> anyhow::Result<()> {
         feed_swap: feed.swap_tx,
         fe_watch: fe_watch_tx,
         emotes: emotes.clone(),
+        filters: filters.clone(),
         rebind: rebind.clone(),
     };
     crate::reload::spawn_watcher(config_path, ctx, quit.clone());
@@ -218,6 +226,7 @@ fn spawn_feed(
     live: SharedLive,
     messages: engine::SharedState,
     tx: broadcast::Sender<String>,
+    filters: crate::filters::SharedCompiled,
 ) -> FeedHandle {
     let (swap_tx, mut swap_rx) = mpsc::unbounded_channel::<String>();
     tokio::spawn(async move {
@@ -246,6 +255,7 @@ fn spawn_feed(
                         live.clone(),
                         messages.clone(),
                         tx.clone(),
+                        filters.clone(),
                         &mut source
                     ));
                     tokio::select! {
@@ -494,6 +504,7 @@ mod tests {
             widget_dist: None,
             channel: "chan".into(),
             creds: None,
+            filters: crate::config::FiltersConfig::default(),
             theme: ThemeConfig {
                 font_size_px: 18,
                 max_messages: 30,

@@ -32,6 +32,7 @@ notify = { workspace = true }
 notify-debouncer-full = { workspace = true }
 tokio-util = { workspace = true }
 reqwest = { workspace = true }
+regex = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }
