@@ -20,6 +20,15 @@ pub struct EmoteRef {
     pub end: usize,
 }
 
+/// The parent message of a Twitch reply thread.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ReplyParent {
+    pub message_id: String,
+    pub user_login: String,
+    pub display_name: String,
+    pub text: String,
+}
+
 /// One parsed chat message.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ChatMessage {
@@ -33,6 +42,8 @@ pub struct ChatMessage {
     pub badges: Vec<Badge>,
     pub emotes: Vec<EmoteRef>,
     pub text: String,
+    /// Present when this message is a Twitch reply thread member.
+    pub reply_parent: Option<ReplyParent>,
 }
 
 /// A new (or renewed) subscription. From USERNOTICE `sub`/`resub`.

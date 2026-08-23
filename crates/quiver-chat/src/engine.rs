@@ -138,6 +138,26 @@ impl From<&EmoteRef> for WireEmote {
     }
 }
 
+/// Reply thread header data on the wire.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct WireReplyParent {
+    pub message_id: String,
+    pub user_login: String,
+    pub display_name: String,
+    pub text: String,
+}
+
+impl From<&quiver_twitch::ReplyParent> for WireReplyParent {
+    fn from(rp: &quiver_twitch::ReplyParent) -> Self {
+        Self {
+            message_id: rp.message_id.clone(),
+            user_login: rp.user_login.clone(),
+            display_name: rp.display_name.clone(),
+            text: rp.text.clone(),
+        }
+    }
+}
+
 /// One message as rendered by the widget.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct RenderedMessage {
@@ -147,6 +167,10 @@ pub struct RenderedMessage {
     pub color: Option<String>,
     /// `/me` action message — rendered italic in the sender's color.
     pub is_action: bool,
+    /// Present when this message replies to another; rendered as a compact
+    /// header strip above the row content.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reply_to: Option<WireReplyParent>,
     pub text: String,
     pub emotes: Vec<WireEmote>,
     pub badges: Vec<WireBadge>,
@@ -160,6 +184,7 @@ impl From<ChatMessage> for RenderedMessage {
             display_name: cm.display_name,
             color: cm.color,
             is_action: false, // twitch-irc strips /me markers; see TODO below
+            reply_to: cm.reply_parent.as_ref().map(WireReplyParent::from),
             text: cm.text,
             emotes: cm.emotes.iter().map(WireEmote::from).collect(),
             badges: cm.badges.iter().map(WireBadge::from).collect(),
@@ -384,6 +409,7 @@ mod tests {
             display_name: "U".into(),
             color: None,
             is_action: false,
+            reply_to: None,
             text: "t".into(),
             emotes: vec![],
             badges: vec![],
@@ -514,6 +540,7 @@ mod tests {
                 end: 9,
             }],
             text: "hey Kappa world".into(),
+            reply_parent: None,
         };
         let r = RenderedMessage::from(cm);
         assert_eq!(

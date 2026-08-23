@@ -16,6 +16,7 @@ body {
 
 .msg {
   display: flex;
+  flex-wrap: wrap; /* lets the reply header take its own full-width line */
   gap: 6px;
   align-items: baseline;
   word-break: break-word;
@@ -87,4 +88,34 @@ body {
 
 .event-icon {
   font-size: 1.2em;
+}
+
+/* Reply thread header: full-width strip above the row content. */
+.reply {
+  flex-basis: 100%; /* force own line inside the flex row */
+  display: flex;
+  gap: 4px;
+  align-items: baseline;
+  background: #2a2a2e; /* gray strip — override via custom_css */
+  border-radius: 3px;
+  padding: 1px 6px;
+  font-size: 0.82em;
+  opacity: 0.85;
+  overflow: hidden;
+}
+
+.reply-arrow {
+  opacity: 0.7;
+}
+
+.reply-user {
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.reply-text {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  opacity: 0.8;
 }

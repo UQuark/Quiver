@@ -95,6 +95,12 @@ fn map_privmsg(pm: PrivmsgMessage) -> ChatMessage {
             })
             .collect(),
         text: pm.message_text,
+        reply_parent: pm.reply_parent.map(|rp| crate::events::ReplyParent {
+            message_id: rp.message_id,
+            user_login: rp.reply_parent_user.login,
+            display_name: rp.reply_parent_user.name,
+            text: rp.message_text,
+        }),
     }
 }
 
@@ -183,6 +189,30 @@ mod tests {
             ServerMessage::UserNotice(un) => map_user_notice(un),
             other => panic!("expected USERNOTICE, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn maps_reply_parent_tags() {
+        // Ground truth BY HAND: reply to abc-123 ("original text") from Y.
+        let line = format!(
+            "@{base};reply-parent-msg-id=abc-123;reply-parent-user-id=99;reply-parent-user-login=y;reply-parent-display-name=Y;reply-parent-msg-body=original\\stext :x!x@x.tmi.twitch.tv PRIVMSG #chan :answering here",
+            base = USERNOTICE_BASE_TAGS
+        );
+        let irc = IRCMessage::parse(&line).expect("parses");
+        let pm = PrivmsgMessage::try_from(irc).expect("parses as privmsg");
+        let cm = map_privmsg(pm);
+
+        let rp = cm.reply_parent.expect("reply parent present");
+        assert_eq!(rp.message_id, "abc-123");
+        assert_eq!(rp.user_login, "y");
+        assert_eq!(rp.display_name, "Y");
+        // Tag unescaping turns \s into spaces.
+        assert_eq!(rp.text, "original text");
+        assert_eq!(cm.text, "answering here");
+
+        // Non-reply messages must carry None.
+        let plain = map_privmsg(parse_line_to_privmsg(LINE));
+        assert!(plain.reply_parent.is_none());
     }
 
     #[test]

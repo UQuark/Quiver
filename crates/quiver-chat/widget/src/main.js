@@ -115,6 +115,19 @@ function renderMessage(m) {
     if (roleCss[b.id]) row.classList.add(`role-${CSS.escape(b.id)}`);
   }
 
+  // Reply thread header: compact strip above the row content.
+  if (m.reply_to) {
+    const header = el("div", "reply");
+    header.append(
+      el("span", "reply-arrow", "↳"),
+      el("span", "reply-user", m.reply_to.display_name),
+      el("span", "reply-text", m.reply_to.text),
+    );
+    // Click jumps to nothing (parent may be expired) but title hints.
+    header.title = m.reply_to.text;
+    row.append(header);
+  }
+
   row.append(renderBadges(m));
 
   const user = el("span", "user", m.display_name);
@@ -122,9 +135,12 @@ function renderMessage(m) {
   row.append(user);
 
   if (m.is_action) {
-    // /me lines: whole line italic in the user's color, no separator.
+    // /me lines: whole line italic in the sender's color, no separator.
     row.classList.add("action");
     if (m.color) row.style.color = m.color;
+    row.append(renderText(m));
+  } else {
+    row.append(el("span", "sep", ":"));
     row.append(renderText(m));
   } else {
     row.append(el("span", "sep", ":"));
