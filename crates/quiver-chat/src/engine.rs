@@ -339,14 +339,9 @@ pub async fn pump(
                     if cm.channel_login != expected_channel {
                         continue; // straggler from a swapped-away channel
                     }
-                    let kind = {
-                        let guard = filters.read().unwrap();
-                        guard
-                            .as_ref()
-                            .map(|f| f.classify_chat(&cm.text))
-                            .unwrap_or(MsgKind::Message)
-                    };
-                    if !permitted(&filters, kind, &cm.user_login, &cm.display_name, &cm.user_id, &cm.badges, &cm.text) {
+                    // Command-style filtering is a content-regex concern
+                    // (e.g. `^!`); every chat message is kind=message.
+                    if !permitted(&filters, MsgKind::Message, &cm.user_login, &cm.display_name, &cm.user_id, &cm.badges, &cm.text) {
                         continue; // filtered: never reaches history or clients
                     }
                     let rendered = RenderedMessage::from(cm);

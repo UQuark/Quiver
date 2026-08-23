@@ -20,7 +20,6 @@ pub(crate) type SharedCompiled = Arc<RwLock<Option<CompiledFilters>>>;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MsgKind {
     Message,
-    Command,
     Sub,
     GiftSub,
     MysteryGift,
@@ -31,7 +30,6 @@ impl MsgKind {
     pub fn parse(s: &str) -> Option<Self> {
         match s {
             "message" => Some(Self::Message),
-            "command" => Some(Self::Command),
             "sub" => Some(Self::Sub),
             "gift_sub" => Some(Self::GiftSub),
             "mystery_gift" => Some(Self::MysteryGift),
@@ -44,24 +42,10 @@ impl MsgKind {
     pub fn name(&self) -> &'static str {
         match self {
             Self::Message => "message",
-            Self::Command => "command",
             Self::Sub => "sub",
             Self::GiftSub => "gift_sub",
             Self::MysteryGift => "mystery_gift",
             Self::Raid => "raid",
-        }
-    }
-
-    /// Classify a chat text against the configured prefixes.
-    fn classify(prefixes: &[String], text: &str) -> Self {
-        let is_command = !text.is_empty()
-            && prefixes
-                .iter()
-                .any(|p| !p.is_empty() && text.starts_with(p.as_str()));
-        if is_command {
-            Self::Command
-        } else {
-            Self::Message
         }
     }
 }
@@ -131,7 +115,6 @@ pub struct PermitCtx<'a> {
 /// Compiled, ready-to-evaluate filters. `None` fields are inactive.
 #[derive(Debug, Default)]
 pub struct CompiledFilters {
-    prefixes: Vec<String>,
     display_name: Option<RegexDim>,
     username: Option<RegexDim>,
     user_id: Option<ExactDim>,
@@ -150,7 +133,6 @@ impl CompiledFilters {
             |dim: &Option<ListFilter>| -> Option<ExactDim> { dim.as_ref().map(ExactDim::new) };
 
         Ok(Self {
-            prefixes: cfg.command_prefixes.clone(),
             display_name: compile_regex_dim(&cfg.display_name)?,
             username: compile_regex_dim(&cfg.username)?,
             user_id: exact(&cfg.user_id),
@@ -205,11 +187,6 @@ impl CompiledFilters {
             }
         }
         true
-    }
-
-    /// Classify chat text into a kind using configured prefixes.
-    pub fn classify_chat(&self, text: &str) -> MsgKind {
-        MsgKind::classify(&self.prefixes, text)
     }
 }
 
@@ -317,27 +294,26 @@ mod tests {
         assert!(f.permits(&ctx(MsgKind::Message, "u", "U", "1", &[], "hello")));
     }
 
-    // ---- kinds + prefixes ---------------------------------------------------
+    // ---- kinds ---------------------------------------------------------------
+    // Command filtering is a content-regex concern (e.g. `^!`), not a kind.
 
     #[test]
-    fn command_classification_honors_configured_prefixes() {
-        let mut c = cfg(); // default ["!"]
+    fn content_regex_covers_command_style_filtering() {
+        // The documented replacement for the removed command_prefixes:
+        // deny content matching ^! — drops "!so xqc", keeps normal text.
+        let mut c = cfg();
+        c.content = Some(list(Mode::Denylist, &["^!"]));
         let f = CompiledFilters::compile(&c).unwrap();
-        assert_eq!(f.classify_chat("!so xqc"), MsgKind::Command);
-        assert_eq!(f.classify_chat("hello"), MsgKind::Message);
-
-        c.command_prefixes = vec!["!".into(), "?".into()];
-        let f2 = CompiledFilters::compile(&c).unwrap();
-        assert_eq!(f2.classify_chat("?so"), MsgKind::Command);
+        assert!(!f.permits(&ctx(MsgKind::Message, "u", "U", "1", &[], "!so xqc")));
+        assert!(f.permits(&ctx(MsgKind::Message, "u", "U", "1", &[], "hello")));
     }
 
     #[test]
-    fn message_type_filter_drops_commands_only() {
+    fn message_type_filter_drops_subs_only() {
         let mut c = cfg();
-        c.message_type = Some(list(Mode::Denylist, &["command"]));
+        c.message_type = Some(list(Mode::Denylist, &["sub"]));
         let f = CompiledFilters::compile(&c).unwrap();
-        assert!(!f.permits(&ctx(MsgKind::Command, "u", "U", "1", &[], "!so")));
-        assert!(f.permits(&ctx(MsgKind::Sub, "u", "U", "1", &[], "")));
+        assert!(!f.permits(&ctx(MsgKind::Sub, "u", "U", "1", &[], "")));
         assert!(f.permits(&ctx(MsgKind::Message, "u", "U", "1", &[], "normal")));
     }
 

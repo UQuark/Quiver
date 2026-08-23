@@ -31,9 +31,6 @@
       "description": "Message filtering (allowlist/denylist per dimension). Absent = no\nfiltering at all.",
       "$ref": "#/$defs/FiltersConfig",
       "default": {
-        "command_prefixes": [
-          "!"
-        ],
         "display_name": null,
         "username": null,
         "user_id": null,
@@ -174,16 +171,6 @@
       "description": "Message filtering rules. Dimensions combine with AND: a message is\nrendered only when EVERY active dimension passes.",
       "type": "object",
       "properties": {
-        "command_prefixes": {
-          "description": "Prefixes that mark a chat message as the `command` kind\n(first match wins). Default: [\"!\"].",
-          "type": "array",
-          "items": {
-            "type": "string"
-          },
-          "default": [
-            "!"
-          ]
-        },
         "display_name": {
           "description": "Regex matched against the sender's display name.",
           "anyOf": [
@@ -218,7 +205,7 @@
           ]
         },
         "content": {
-          "description": "Regex matched against the message text. Events have empty text.",
+          "description": "Regex matched against the message text. Events have empty text.\nUse patterns like `^!` to filter chat commands.",
           "anyOf": [
             {
               "$ref": "#/$defs/ListFilter"
@@ -229,7 +216,7 @@
           ]
         },
         "message_type": {
-          "description": "Message kind names: message | command | sub | gift_sub |\nmystery_gift | raid. Unknown names are config errors.",
+          "description": "Message kind names: message | sub | gift_sub | mystery_gift |\nraid. Unknown names are config errors.",
           "anyOf": [
             {
               "$ref": "#/$defs/ListFilter"

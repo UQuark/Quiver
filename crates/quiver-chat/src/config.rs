@@ -197,35 +197,10 @@ pub struct ListFilter {
     pub items: Vec<String>,
 }
 
-fn default_command_prefixes() -> Vec<String> {
-    vec!["!".to_string()]
-}
-
-// MANUAL Default: derived Default would ignore the serde field default and
-// produce empty prefixes — inconsistent with parsed configs AND with what
-// generate_default emits.
-impl Default for FiltersConfig {
-    fn default() -> Self {
-        Self {
-            command_prefixes: default_command_prefixes(),
-            display_name: None,
-            username: None,
-            user_id: None,
-            content: None,
-            message_type: None,
-            role: None,
-        }
-    }
-}
-
 /// Message filtering rules. Dimensions combine with AND: a message is
 /// rendered only when EVERY active dimension passes.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct FiltersConfig {
-    /// Prefixes that mark a chat message as the `command` kind
-    /// (first match wins). Default: ["!"].
-    #[serde(default = "default_command_prefixes")]
-    pub command_prefixes: Vec<String>,
     /// Regex matched against the sender's display name.
     pub display_name: Option<ListFilter>,
     /// Regex matched against the sender's login name (always lowercase).
@@ -233,9 +208,10 @@ pub struct FiltersConfig {
     /// EXACT match against the sender's Twitch user id (numeric string).
     pub user_id: Option<ListFilter>,
     /// Regex matched against the message text. Events have empty text.
+    /// Use patterns like `^!` to filter chat commands.
     pub content: Option<ListFilter>,
-    /// Message kind names: message | command | sub | gift_sub |
-    /// mystery_gift | raid. Unknown names are config errors.
+    /// Message kind names: message | sub | gift_sub | mystery_gift |
+    /// raid. Unknown names are config errors.
     pub message_type: Option<ListFilter>,
     /// Badge ids carried by the sender — same vocabulary as role_css
     /// (moderator, vip, subscriber, ...). Events carry no badges in v1.
@@ -301,12 +277,6 @@ impl Validate for ChatConfig {
         // A broken filter is functional, not cosmetic — these are hard
         // validation errors, unlike advisory CSS lint.
         let f = &self.filters;
-        require(
-            f.command_prefixes.iter().all(|p| !p.is_empty()),
-            "filters.command_prefixes",
-            "prefixes must not be empty strings",
-            &mut out,
-        );
         for (name, dim) in [
             ("display_name", &f.display_name),
             ("username", &f.username),
@@ -329,8 +299,8 @@ impl Validate for ChatConfig {
                     out.push(ValidationIssue {
                         path: "filters.message_type.items".to_string(),
                         message: format!(
-                            "unknown message kind {item:?} — expected one of: \
-                             message, command, sub, gift_sub, mystery_gift, raid"
+                            "unknown message kind {item:?} \u{2014} expected one of: \
+                             message, sub, gift_sub, mystery_gift, raid"
                         ),
                     });
                 }
