@@ -163,6 +163,8 @@ impl From<&quiver_twitch::ReplyParent> for WireReplyParent {
 pub struct RenderedMessage {
     pub id: String,
     pub user_login: String,
+    /// Twitch numeric user id — needed for per-user custom badges.
+    pub user_id: String,
     pub display_name: String,
     pub color: Option<String>,
     /// `/me` action message — rendered italic in the sender's color.
@@ -181,6 +183,7 @@ impl From<ChatMessage> for RenderedMessage {
         Self {
             id: cm.id,
             user_login: cm.user_login,
+            user_id: cm.user_id.clone(),
             display_name: cm.display_name,
             color: cm.color,
             is_action: false, // twitch-irc strips /me markers; see TODO below
@@ -401,6 +404,7 @@ mod tests {
         RenderedMessage {
             id: id.to_string(),
             user_login: "u".into(),
+            user_id: "1".into(),
             display_name: "U".into(),
             color: None,
             is_action: false,

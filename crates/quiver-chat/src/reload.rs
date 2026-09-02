@@ -26,6 +26,7 @@ pub(crate) struct ReloadCtx {
     pub messages: crate::engine::SharedState,
     pub tx: tokio::sync::broadcast::Sender<String>,
     pub badges: SharedBadges,
+    pub custom_badges: crate::badges::SharedBadgeCache,
     pub emotes: crate::emotes::SharedEmotes,
     pub filters: crate::filters::SharedCompiled,
     pub feed_swap: mpsc::UnboundedSender<String>,
@@ -368,12 +369,39 @@ async fn apply_action(ctx: &ReloadCtx, action: &Action, new_live: &LiveConfig) {
             // only after all actions ran). Reading it here broadcasts the
             // previous state, making every reload appear one-behind.
             let badges = ctx.badges.read().map(|b| b.clone()).unwrap_or_default();
+            let custom = ctx
+                .custom_badges
+                .read()
+                .ok()
+                .and_then(|g| g.as_ref().map(|c| c.resolved.clone()));
             let frame = serde_json::json!({
                 "type": "config",
-                "meta": crate::serve::meta_value(new_live, &badges),
+                "meta": crate::serve::meta_value(new_live, &badges, custom.as_ref()),
             });
             let _ = ctx.tx.send(frame.to_string());
         }
+        Action::ResolveBadges => match &new_live.badges {
+            Some(badge_cfg) => {
+                let http = reqwest::Client::new();
+                match crate::badges::resolve_full(badge_cfg, &http).await {
+                    Ok(state) => {
+                        if let Ok(mut g) = ctx.custom_badges.write() {
+                            *g = Some(state);
+                        }
+                        info!("custom badge cache re-resolved");
+                    }
+                    Err(e) => {
+                        warn!(error = %e, "custom badge re-resolution failed — keeping old cache");
+                    }
+                }
+            }
+            None => {
+                if let Ok(mut g) = ctx.custom_badges.write() {
+                    *g = None;
+                }
+                info!("custom badges removed");
+            }
+        },
         Action::Rebind => ctx.rebind.notify_one(),
     }
 }

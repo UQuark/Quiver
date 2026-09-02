@@ -73,6 +73,12 @@ body {
   vertical-align: middle;
 }
 
+/* Custom badges (per-role/per-user) — height set inline per definition. */
+.custom-badge {
+  vertical-align: middle;
+  margin-right: 2px;
+}
+
 .emote {
   height: 1.4em;
   vertical-align: middle;

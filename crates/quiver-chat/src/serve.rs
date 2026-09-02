@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 
 use axum::Router;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{Request, State};
+use axum::extract::{Path as AxumPath, Request, State};
 use axum::http::{StatusCode, header};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::get;
@@ -38,6 +38,7 @@ pub(crate) struct AppState {
     pub messages: engine::SharedState,
     pub tx: broadcast::Sender<String>,
     pub badges: SharedBadges,
+    pub custom_badges: crate::badges::SharedBadgeCache,
     pub emotes: crate::emotes::SharedEmotes,
     /// Generation token: cancelled on rebind/shutdown so WS handlers
     /// return instead of blocking graceful drain forever.
@@ -88,6 +89,26 @@ pub async fn run(cfg: ChatConfig, config_path: PathBuf) -> anyhow::Result<()> {
     .await;
     let emotes: crate::emotes::SharedEmotes = Arc::new(RwLock::new(initial_emotes));
 
+    let custom_badges = match &cfg.badges {
+        Some(badge_cfg) => {
+            let http = reqwest::Client::new();
+            match crate::badges::resolve_full(badge_cfg, &http).await {
+                Ok(state) => {
+                    info!(
+                        count = state.resolved.definitions.len(),
+                        "custom badge cache ready"
+                    );
+                    Arc::new(RwLock::new(Some(state)))
+                }
+                Err(e) => {
+                    warn!(error = %e, "custom badge resolution failed — starting without");
+                    Arc::new(RwLock::new(None))
+                }
+            }
+        }
+        None => Arc::new(RwLock::new(None)),
+    };
+
     let quit = CancellationToken::new();
     let rebind = Arc::new(Notify::new());
 
@@ -125,6 +146,7 @@ pub async fn run(cfg: ChatConfig, config_path: PathBuf) -> anyhow::Result<()> {
         badges: badges.clone(),
         feed_swap: feed.swap_tx,
         fe_watch: fe_watch_tx,
+        custom_badges: custom_badges.clone(),
         emotes: emotes.clone(),
         filters: filters.clone(),
         rebind: rebind.clone(),
@@ -151,6 +173,7 @@ pub async fn run(cfg: ChatConfig, config_path: PathBuf) -> anyhow::Result<()> {
             messages: messages.clone(),
             tx: tx.clone(),
             badges: badges.clone(),
+            custom_badges: custom_badges.clone(),
             emotes: emotes.clone(),
             ws_token,
         });
@@ -203,6 +226,8 @@ fn router(state: AppState) -> Router {
     Router::new()
         .route("/ws", get(ws_handler))
         .route("/health", get(|| async { "ok" }))
+        .route("/badge-cache/{hash}", get(badge_cache_handler))
+        .route("/badge-file/{hash}", get(badge_file_handler))
         .route(
             "/emotes.json",
             get(|State(state): State<AppState>| async move {
@@ -361,7 +386,11 @@ async fn load_badge_map_opt(
 // ---- wire -----------------------------------------------------------------
 
 /// Meta block shared by snapshots and config-update frames.
-pub(crate) fn meta_value(live: &LiveConfig, badges: &HashMap<String, String>) -> serde_json::Value {
+pub(crate) fn meta_value(
+    live: &LiveConfig,
+    badges: &HashMap<String, String>,
+    custom_badges: Option<&crate::badges::ResolvedCustomBadges>,
+) -> serde_json::Value {
     serde_json::json!({
         "theme": {
             "font_size_px": live.theme.font_size_px,
@@ -377,19 +406,22 @@ pub(crate) fn meta_value(live: &LiveConfig, badges: &HashMap<String, String>) ->
             "bttv": live.emotes.bttv,
             "ffz": live.emotes.ffz,
         },
+        "custom_badges": custom_badges,
     })
 }
 
 fn snapshot_frame(app: &AppState) -> Option<String> {
     let live = app.live.read().ok()?;
     let badges = app.badges.read().ok()?;
+    let custom_badges = app.custom_badges.read().ok()?;
+    let custom = custom_badges.as_ref().map(|c| &c.resolved);
     let st = app.messages.lock().ok()?;
     let messages: Vec<&engine::RenderedMessage> = st.messages().collect();
     Some(
         serde_json::json!({
             "type": "snapshot",
             "messages": messages,
-            "meta": meta_value(&live, &badges),
+            "meta": meta_value(&live, &badges, custom),
         })
         .to_string(),
     )
@@ -435,6 +467,64 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
 
 /// Static files resolved PER REQUEST from the live widget_dist path —
 /// hot-swapping `server.widget_dist` needs no router rebuild.
+/// Serve a cached custom badge body by content hash. Content-addressed →
+/// immutable → browser caches aggressively with no revalidation.
+async fn badge_cache_handler(
+    State(state): State<AppState>,
+    AxumPath(hash): AxumPath<String>,
+) -> Response {
+    let guard = match state.custom_badges.read() {
+        Ok(g) => g,
+        Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "cache lock").into_response(),
+    };
+    let Some(cache) = guard.as_ref() else {
+        return (StatusCode::NOT_FOUND, "no badge cache").into_response();
+    };
+    match crate::badges::read_cached_file(cache, &hash) {
+        Some((bytes, content_type)) => (
+            [
+                (header::CONTENT_TYPE, content_type.as_str()),
+                (header::CACHE_CONTROL, "public, max-age=31536000, immutable"),
+            ],
+            bytes,
+        )
+            .into_response(),
+        None => (StatusCode::NOT_FOUND, "not found").into_response(),
+    }
+}
+
+/// Serve a file:// custom badge by url-hash — pure passthrough from the
+/// canonical path (no caching: user-controlled local files are read fresh).
+async fn badge_file_handler(
+    State(state): State<AppState>,
+    AxumPath(hash): AxumPath<String>,
+) -> Response {
+    let guard = match state.custom_badges.read() {
+        Ok(g) => g,
+        Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "cache lock").into_response(),
+    };
+    let Some(cache) = guard.as_ref() else {
+        return (StatusCode::NOT_FOUND, "no badge cache").into_response();
+    };
+    let Some(path) = cache.file_badges.get(&hash) else {
+        return (StatusCode::NOT_FOUND, "unknown file badge").into_response();
+    };
+    match std::fs::read(path) {
+        Ok(bytes) => {
+            let ct = crate::badges::sniff_content_type(&bytes);
+            (
+                [
+                    (header::CONTENT_TYPE, ct),
+                    (header::CACHE_CONTROL, "no-cache"),
+                ],
+                bytes,
+            )
+                .into_response()
+        }
+        Err(_) => (StatusCode::NOT_FOUND, "file badge missing").into_response(),
+    }
+}
+
 async fn static_fallback(State(state): State<AppState>, req: Request) -> Response {
     let dist = state.live.read().unwrap().widget_dist.clone();
     let Some(dist) = dist.filter(|d| d.is_dir()) else {
@@ -505,6 +595,7 @@ mod tests {
             channel: "chan".into(),
             creds: None,
             filters: crate::config::FiltersConfig::default(),
+            badges: None,
             theme: ThemeConfig {
                 font_size_px: 18,
                 max_messages: 30,
@@ -522,7 +613,7 @@ mod tests {
         let mut roles = HashMap::new();
         roles.insert("moderator".to_string(), ".msg{}".to_string());
         let live = live_with(Some("/*c*/"), Some(roles));
-        let m = meta_value(&live, &HashMap::new());
+        let m = meta_value(&live, &HashMap::new(), None);
 
         assert_eq!(m["custom_css"], "/*c*/");
         assert_eq!(m["role_css"]["moderator"], ".msg{}");
@@ -532,7 +623,7 @@ mod tests {
     #[test]
     fn meta_omits_unset_css_fields_as_null() {
         let live = live_with(None, None);
-        let m = meta_value(&live, &HashMap::new());
+        let m = meta_value(&live, &HashMap::new(), None);
         assert!(m["custom_css"].is_null());
         assert!(m["role_css"].is_null());
     }

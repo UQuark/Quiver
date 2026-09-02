@@ -30,6 +30,10 @@ pub struct ChatConfig {
     /// filtering at all.
     #[serde(default)]
     pub filters: FiltersConfig,
+    /// Custom per-role / per-user badge images with explicit priority and
+    /// server-side caching. Absent = no custom badges.
+    #[serde(default)]
+    pub badges: Option<CustomBadgesConfig>,
 }
 
 fn default_true() -> bool {
@@ -218,6 +222,59 @@ pub struct FiltersConfig {
     pub role: Option<ListFilter>,
 }
 
+fn default_refresh_interval() -> u64 {
+    86400 // 24h
+}
+
+/// One custom badge image: a remote URL with display metadata.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct CustomBadgeDefinition {
+    /// Remote URL of the badge image (http:// or https://).
+    pub uri: String,
+    /// Lower value renders first in the badge row; ties broken by
+    /// insertion order (JSON map key order).
+    pub priority: u32,
+    /// Display height in CSS pixels (applied to the <img> tag).
+    pub height: u32,
+    /// Optional tooltip text.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+}
+
+/// Custom badge system: per-role and/or per-user badge attachments.
+/// Badge images are fetched server-side and cached by content hash.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct CustomBadgesConfig {
+    /// Badge image definitions: id → {uri, priority, height, label?}.
+    /// HTTP(S) URIs only; fetched once at startup/reload and cached
+    /// by content hash at `cache_dir`.
+    pub definitions: HashMap<String, CustomBadgeDefinition>,
+    /// Twitch badge set id → list of custom badge ids to attach.
+    pub per_role: HashMap<String, Vec<String>>,
+    /// Twitch user id → list of custom badge ids to attach.
+    pub per_user: HashMap<String, Vec<String>>,
+    /// Cache directory override. Default: `$XDG_CACHE_HOME/Quiver/badges/`
+    /// or `~/.cache/Quiver/badges/` if unset.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_dir: Option<PathBuf>,
+    /// Seconds between HTTP badge re-validations via conditional GET.
+    /// Default 86400 (24 hours).
+    #[serde(default = "default_refresh_interval")]
+    pub refresh_interval_secs: u64,
+}
+
+impl Default for CustomBadgesConfig {
+    fn default() -> Self {
+        Self {
+            definitions: HashMap::new(),
+            per_role: HashMap::new(),
+            per_user: HashMap::new(),
+            cache_dir: None,
+            refresh_interval_secs: 86400,
+        }
+    }
+}
+
 impl Validate for ChatConfig {
     fn validate(&self) -> Vec<ValidationIssue> {
         let mut out = Vec::new();
@@ -303,6 +360,59 @@ impl Validate for ChatConfig {
                              message, sub, gift_sub, mystery_gift, raid"
                         ),
                     });
+                }
+            }
+        }
+
+        // Custom badges: URI format, priority, height, references.
+        if let Some(badges) = &self.badges {
+            require(
+                badges.refresh_interval_secs > 0,
+                "badges.refresh_interval_secs",
+                "must be at least 1",
+                &mut out,
+            );
+            for (id, defn) in &badges.definitions {
+                if !defn.uri.starts_with("http://")
+                    && !defn.uri.starts_with("https://")
+                    && !defn.uri.starts_with("file://")
+                {
+                    out.push(ValidationIssue {
+                        path: format!("badges.definitions.{id}.uri"),
+                        message: "must start with http://, https:// or file://".to_string(),
+                    });
+                }
+                if defn.priority == 0 {
+                    out.push(ValidationIssue {
+                        path: format!("badges.definitions.{id}.priority"),
+                        message: "must be greater than 0".to_string(),
+                    });
+                }
+                if defn.height == 0 {
+                    out.push(ValidationIssue {
+                        path: format!("badges.definitions.{id}.height"),
+                        message: "must be greater than 0".to_string(),
+                    });
+                }
+            }
+            for (role, ids) in &badges.per_role {
+                for id in ids {
+                    if !badges.definitions.contains_key(id.as_str()) {
+                        out.push(ValidationIssue {
+                            path: format!("badges.per_role.{role}"),
+                            message: format!("references undefined badge {id:?}"),
+                        });
+                    }
+                }
+            }
+            for (uid, ids) in &badges.per_user {
+                for id in ids {
+                    if !badges.definitions.contains_key(id.as_str()) {
+                        out.push(ValidationIssue {
+                            path: format!("badges.per_user.{uid}"),
+                            message: format!("references undefined badge {id:?}"),
+                        });
+                    }
                 }
             }
         }

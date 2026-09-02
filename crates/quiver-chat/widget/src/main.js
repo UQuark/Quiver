@@ -13,6 +13,8 @@ let roleCss = {}; // badge set id -> css snippet for message rows
 // done client-side via emoteFlags so disabled providers STRIP tokens.
 let thirdParty = {};
 let emoteFlags = { twitch: true, unicode: true, seventv: true, bttv: true, ffz: true };
+// Custom badges from meta: { definitions, per_role, per_user }.
+let customBadges = { definitions: {}, per_role: {}, per_user: {} };
 // Lookup precedence when the same code exists in multiple providers.
 const PROVIDER_ORDER = ["ffz", "bttv", "seventv"];
 const EXPIRE_FADE_MS = 350;
@@ -69,8 +71,38 @@ function el(tag, cls, text) {
   return node;
 }
 
+// Custom badges render FIRST (before Twitch CDN badges), ordered by
+// priority ascending. Set = per-role (for each Twitch badge id the
+// sender carries) ∪ per-user (by Twitch user id), deduplicated.
+function renderCustomBadges(wrap, m) {
+  const chosen = new Set();
+  for (const b of m.badges || []) {
+    for (const id of customBadges.per_role[b.id] || []) chosen.add(id);
+  }
+  for (const id of customBadges.per_user[m.user_id] || []) chosen.add(id);
+
+  const ordered = [...chosen].sort((a, b) => {
+    const pa = customBadges.definitions[a]?.priority ?? 0;
+    const pb = customBadges.definitions[b]?.priority ?? 0;
+    return pa - pb;
+  });
+
+  for (const id of ordered) {
+    const d = customBadges.definitions[id];
+    if (!d) continue;
+    const img = document.createElement("img");
+    img.className = "custom-badge";
+    img.src = d.url;
+    img.alt = d.label || id;
+    if (d.height) img.style.height = `${d.height}px`;
+    if (d.label) img.title = d.label;
+    wrap.append(img);
+  }
+}
+
 function renderBadges(m) {
   const wrap = el("span", "badges");
+  renderCustomBadges(wrap, m); // custom first, priority-ordered
   for (const b of m.badges || []) {
     const url = badgeUrls[`${b.id}/${b.version}`];
     if (!url) continue; // unknown badge — skip silently
@@ -165,6 +197,7 @@ function applyMeta(meta) {
   if (!meta) return;
   if (meta.badges) badgeUrls = meta.badges;
   if (meta.emote_flags) emoteFlags = meta.emote_flags;
+  if (meta.custom_badges) customBadges = meta.custom_badges;
   // Role map drives BOTH class assignment on new rows and the injected
   // sheet — forgetting to store it here meant styles existed but no row
   // ever matched them.

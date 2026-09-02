@@ -22,6 +22,8 @@ pub struct LiveConfig {
     pub emotes: EmotesConfig,
     /// Message filtering rules; engine-facing.
     pub filters: crate::config::FiltersConfig,
+    /// Custom badge definitions (per-role/per-user); meta-facing.
+    pub badges: Option<crate::config::CustomBadgesConfig>,
 }
 
 impl From<&ChatConfig> for LiveConfig {
@@ -38,6 +40,7 @@ impl From<&ChatConfig> for LiveConfig {
             theme: cfg.theme.clone(),
             emotes: cfg.emotes.clone(),
             filters: cfg.filters.clone(),
+            badges: cfg.badges.clone(),
         }
     }
 }
@@ -57,6 +60,8 @@ pub enum Action {
     RefreshBadges,
     /// Channel or credentials changed — third-party emote set differs.
     RefreshEmotes,
+    /// Custom badge definitions changed — re-resolve cache.
+    ResolveBadges,
     /// Filtering rules changed — recompile engine matchers.
     ApplyFilters,
     /// Push fresh meta (theme/badges/custom_css) to connected clients.
@@ -98,6 +103,10 @@ pub fn planned_actions(old: &LiveConfig, new: &LiveConfig) -> Vec<Action> {
     if old.filters != new.filters {
         out.push(Action::ApplyFilters);
     }
+    if old.badges != new.badges {
+        out.push(Action::ResolveBadges);
+        broadcast_meta = true;
+    }
     if broadcast_meta {
         out.push(Action::BroadcastMeta);
     }
@@ -136,6 +145,7 @@ mod tests {
             },
             emotes: EmotesConfig::default(),
             filters: crate::config::FiltersConfig::default(),
+            badges: None,
         }
     }
 
