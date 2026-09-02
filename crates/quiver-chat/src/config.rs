@@ -251,7 +251,9 @@ pub struct CustomBadgesConfig {
     pub definitions: HashMap<String, CustomBadgeDefinition>,
     /// Twitch badge set id → list of custom badge ids to attach.
     pub per_role: HashMap<String, Vec<String>>,
-    /// Twitch user id → list of custom badge ids to attach.
+    /// User → list of custom badge ids to attach. Keys are the Twitch
+    /// numeric user id (stable across renames) OR the login handle —
+    /// both are matched.
     pub per_user: HashMap<String, Vec<String>>,
     /// Cache directory override. Default: `$XDG_CACHE_HOME/Quiver/badges/`
     /// or `~/.cache/Quiver/badges/` if unset.

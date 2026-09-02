@@ -363,12 +363,14 @@ pub fn read_cached_file(state: &BadgeCacheState, content_hash: &str) -> Option<(
 /// Compute the custom badges attached to a message, in render order.
 ///
 /// Union of per-role (for each Twitch badge id the sender carries) and
-/// per-user (by Twitch user id), deduplicated, sorted by `priority`
-/// ascending (ties broken by insertion order via definition map order).
+/// per-user (by Twitch user id OR login), deduplicated, sorted by
+/// `priority` ascending (ties broken by insertion order via definition
+/// map order). Mirrors the widget's JS merge exactly.
 pub fn merge_badges<'a>(
     resolved: &'a ResolvedCustomBadges,
     message_badge_ids: &[&str],
     user_id: &str,
+    user_login: &str,
 ) -> Vec<&'a ResolvedBadge> {
     let mut candidates: Vec<&str> = Vec::new();
     for bid in message_badge_ids {
@@ -377,6 +379,8 @@ pub fn merge_badges<'a>(
         }
     }
     if let Some(ids) = resolved.per_user.get(user_id) {
+        candidates.extend(ids.iter().map(String::as_str));
+    } else if let Some(ids) = resolved.per_user.get(user_login) {
         candidates.extend(ids.iter().map(String::as_str));
     }
 
@@ -500,7 +504,7 @@ mod tests {
         };
 
         // Mod with user_id=42: badges from both role("a"p20 + "b"p10) and user("c"p10).
-        let user_badges = merge_badges(&badges, &["moderator"], "42");
+        let user_badges = merge_badges(&badges, &["moderator"], "42", "mod42");
         let ids: Vec<&str> = user_badges.iter().map(|b| b.id.as_str()).collect();
         assert_eq!(ids, vec!["b", "c", "a"]); // p10s first (b then c in order), then p20
     }
@@ -508,7 +512,7 @@ mod tests {
     #[test]
     fn unknown_role_user_keys_are_ignored() {
         let badges = ResolvedCustomBadges::default();
-        let merged = merge_badges(&badges, &["unknown_role"], "999");
+        let merged = merge_badges(&badges, &["unknown_role"], "999", "unknown");
         assert!(merged.is_empty());
     }
 
@@ -530,7 +534,7 @@ mod tests {
             per_role: HashMap::new(),
             per_user: HashMap::new(),
         };
-        let merged = merge_badges(&badges, &[], "0");
+        let merged = merge_badges(&badges, &[], "0", "user0");
         assert!(merged.is_empty());
     }
 }

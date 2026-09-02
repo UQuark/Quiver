@@ -79,7 +79,7 @@ function renderCustomBadges(wrap, m) {
   for (const b of m.badges || []) {
     for (const id of customBadges.per_role[b.id] || []) chosen.add(id);
   }
-  for (const id of customBadges.per_user[m.user_id] || []) chosen.add(id);
+  for (const id of customBadges.per_user[m.user_id] || customBadges.per_user[m.user_login] || []) chosen.add(id);
 
   const ordered = [...chosen].sort((a, b) => {
     const pa = customBadges.definitions[a]?.priority ?? 0;
