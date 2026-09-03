@@ -222,6 +222,12 @@ function expire(ids) {
   }
 }
 
+// A moderator/streamer deleted the message — hide it outright (no fade).
+function removeMessage(id) {
+  const node = chat.querySelector(`[data-id="${CSS.escape(id)}"]`);
+  if (node) node.remove();
+}
+
 function applyMeta(meta) {
   if (!meta) return;
   if (meta.badges) badgeUrls = meta.badges;
@@ -330,6 +336,9 @@ function handle(wire) {
       break;
     case "expire":
       expire(wire.ids || []);
+      break;
+    case "delete":
+      removeMessage(wire.id);
       break;
     case "config":
       // Hot reload: theme/badges/custom_css changed server-side.

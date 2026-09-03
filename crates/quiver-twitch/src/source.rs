@@ -11,8 +11,8 @@ use twitch_irc::{ClientConfig, SecureTCPTransport, TwitchIRCClient};
 
 use crate::error::TwitchError;
 use crate::events::{
-    Badge, ChatMessage, EmoteRef, Event, GifRef, GiftSubEvent, MysteryGiftEvent, RaidEvent,
-    SubEvent,
+    Badge, ChatMessage, EmoteRef, Event, GifRef, GiftSubEvent, MessageDeleted, MysteryGiftEvent,
+    RaidEvent, SubEvent,
 };
 
 type Client = TwitchIRCClient<SecureTCPTransport, StaticLoginCredentials>;
@@ -56,6 +56,12 @@ impl IrcChatSource {
         loop {
             match self.incoming.recv().await? {
                 ServerMessage::Privmsg(pm) => return Some(Event::ChatMessage(map_privmsg(pm))),
+                ServerMessage::ClearMsg(cm) => {
+                    return Some(Event::MessageDeleted(MessageDeleted {
+                        message_id: cm.message_id,
+                        sender_login: cm.sender_login,
+                    }));
+                }
                 ServerMessage::UserNotice(un) => return Some(map_user_notice(un)),
                 ServerMessage::Ping(ping) => {
                     // PingMessage keeps only the raw IRC frame; the token is
@@ -461,6 +467,25 @@ mod tests {
                 assert_eq!(m.tier, "1000");
             }
             other => panic!("expected MysteryGift, got {other:?}"),
+        }
+    }
+
+    /// Ground truth BY HAND: a moderator CLEARMSG carries the deleted
+    /// message id + sender login; we surface it as MessageDeleted.
+    #[test]
+    fn maps_clearmsg_to_message_deleted() {
+        let line = "@login=offender;room-id=123;target-msg-id=abc-123;tmi-sent-ts=1783632907018 :tmi.twitch.tv CLEARMSG #likh_tar :the deleted message";
+        let irc = IRCMessage::parse(line).expect("parses");
+        match ServerMessage::try_from(irc).expect("parses as ServerMessage") {
+            ServerMessage::ClearMsg(cm) => {
+                let ev = crate::events::MessageDeleted {
+                    message_id: cm.message_id,
+                    sender_login: cm.sender_login,
+                };
+                assert_eq!(ev.message_id, "abc-123");
+                assert_eq!(ev.sender_login, "offender");
+            }
+            other => panic!("expected ClearMsg, got {other:?}"),
         }
     }
 

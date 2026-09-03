@@ -13,8 +13,8 @@ pub mod source;
 
 pub use error::TwitchError;
 pub use events::{
-    Badge, ChatMessage, EmoteRef, Event, GifRef, GiftSubEvent, MysteryGiftEvent, RaidEvent,
-    ReplyParent, SubEvent,
+    Badge, ChatMessage, EmoteRef, Event, GifRef, GiftSubEvent, MessageDeleted, MysteryGiftEvent,
+    RaidEvent, ReplyParent, SubEvent,
 };
 pub use helix::{HelixClient, HelixError};
 pub use source::IrcChatSource;

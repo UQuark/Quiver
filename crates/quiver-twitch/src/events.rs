@@ -111,6 +111,13 @@ pub struct RaidEvent {
     pub viewers: u64,
 }
 
+/// A chat message removed by a moderator/streamer. From IRC `CLEARMSG`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MessageDeleted {
+    pub message_id: String,
+    pub sender_login: String,
+}
+
 /// Events surfaced by a chat source.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Event {
@@ -119,6 +126,8 @@ pub enum Event {
     GiftSub(GiftSubEvent),
     MysteryGift(MysteryGiftEvent),
     Raid(RaidEvent),
+    /// A message was deleted by a moderator/streamer (IRC CLEARMSG).
+    MessageDeleted(MessageDeleted),
     /// Server PING. Answered internally by the library; informational only.
     Ping(String),
     /// Anything not yet modeled (JOIN/PART/NOTICE/USERNOTICE/...).

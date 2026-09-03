@@ -11,8 +11,8 @@ use std::time::{Duration, Instant};
 
 use crate::filters::MsgKind;
 use quiver_twitch::{
-    Badge, ChatMessage, EmoteRef, Event, GifRef, GiftSubEvent, MysteryGiftEvent, RaidEvent,
-    SubEvent,
+    Badge, ChatMessage, EmoteRef, Event, GifRef, GiftSubEvent, MessageDeleted, MysteryGiftEvent,
+    RaidEvent, SubEvent,
 };
 use serde::Serialize;
 use tracing::warn;
@@ -295,6 +295,13 @@ impl EngineState {
         self.messages.drain(..).map(|e| e.msg.id).collect()
     }
 
+    /// Remove a single message by id; returns whether it was present.
+    pub fn remove_by_id(&mut self, id: &str) -> bool {
+        let before = self.messages.len();
+        self.messages.retain(|e| e.msg.id != id);
+        self.messages.len() != before
+    }
+
     pub fn messages(&self) -> impl Iterator<Item = &RenderedMessage> {
         self.messages.iter().map(|e| &e.msg)
     }
@@ -397,6 +404,15 @@ pub async fn pump(
                     if permitted(&filters, MsgKind::MysteryGift, "", "", "", &[], "") {
                         send_event(&tx, m);
                     }
+                }
+                Some(Event::MessageDeleted(MessageDeleted { message_id, .. })) => {
+                    // Drop from history so future snapshots exclude it, and
+                    // announce so connected clients hide it immediately.
+                    if let Ok(mut st) = state.lock() {
+                        st.remove_by_id(&message_id);
+                    }
+                    let frame = serde_json::json!({ "type": "delete", "id": message_id });
+                    let _ = tx.send(frame.to_string());
                 }
                 Some(Event::Raid(r)) => {
                     if permitted(&filters, MsgKind::Raid, &r.from_login, &r.from_display_name, "", &[], "") {
@@ -509,6 +525,22 @@ mod tests {
         }
         assert_eq!(st.clear(), vec!["x".to_string(), "y".to_string()]);
         assert_eq!(st.len(), 0);
+    }
+
+    /// Ground truth BY HAND: remove_by_id drops exactly one message by id.
+    #[test]
+    fn remove_by_id_deletes_the_matching_message() {
+        let mut st = EngineState::new(5);
+        for id in ["a", "b", "c"] {
+            st.push(msg(id));
+        }
+        assert!(st.remove_by_id("b"));
+        let ids: Vec<&str> = st.messages().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, ["a", "c"]);
+
+        // Removing an absent id is a no-op returning false.
+        assert!(!st.remove_by_id("z"));
+        assert_eq!(st.len(), 2);
     }
 
     /// Ground truth BY HAND: wire frames are internally-tagged JSON.
