@@ -4,7 +4,11 @@
 
 // Twitch retired v2 scale paths AND extensions don't exist on this CDN:
 // /emoticons/v1/{id}/2.0 is the live, id-stable pattern (verified 200s).
+// Static emotes: numeric ids (Kappa etc.) live on v1. Animated emotes are
+// emotesv2_* ids whose animation lives on the v2 path (image/gif, probed
+// live: v1/2.0 = 6KB static png, v2/dark/2.0 = 202KB animated gif).
 const EMOTE_CDN = "https://static-cdn.jtvnw.net/emoticons/v1/{id}/2.0";
+const EMOTE_CDN_V2 = "https://static-cdn.jtvnw.net/emoticons/v2/{id}/default/dark/2.0";
 
 let badgeUrls = {}; // "set_id/version" -> image url
 let maxMessages = 30;
@@ -152,7 +156,17 @@ function renderText(m) {
       if (emoteFlags.twitch) {
         const img = document.createElement("img");
         img.className = "emote";
-        img.src = EMOTE_CDN.replace("{id}", encodeURIComponent(r.id));
+        const id = encodeURIComponent(r.id);
+        if (r.id.startsWith("emotesv2_")) {
+          // Animated variant; static v1 as fallback if v2 is unavailable.
+          img.src = EMOTE_CDN_V2.replace("{id}", id);
+          img.onerror = () => {
+            img.onerror = null;
+            img.src = EMOTE_CDN.replace("{id}", id);
+          };
+        } else {
+          img.src = EMOTE_CDN.replace("{id}", id);
+        }
         img.alt = m.text.slice(r.start, r.end);
         wrap.append(img);
       } else if (!emoteFlags.unicode) {
