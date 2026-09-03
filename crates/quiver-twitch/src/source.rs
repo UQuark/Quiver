@@ -11,7 +11,8 @@ use twitch_irc::{ClientConfig, SecureTCPTransport, TwitchIRCClient};
 
 use crate::error::TwitchError;
 use crate::events::{
-    Badge, ChatMessage, EmoteRef, Event, GiftSubEvent, MysteryGiftEvent, RaidEvent, SubEvent,
+    Badge, ChatMessage, EmoteRef, Event, GifRef, GiftSubEvent, MysteryGiftEvent, RaidEvent,
+    SubEvent,
 };
 
 type Client = TwitchIRCClient<SecureTCPTransport, StaticLoginCredentials>;
@@ -95,6 +96,7 @@ fn map_privmsg(pm: PrivmsgMessage) -> ChatMessage {
             })
             .collect(),
         text: pm.message_text,
+        gifs: parse_gifs_tag(pm.source.tags.0.get("gifs").map(String::as_str)),
         reply_parent: pm.reply_parent.map(|rp| crate::events::ReplyParent {
             message_id: rp.message_id,
             user_login: rp.reply_parent_user.login,
@@ -102,6 +104,40 @@ fn map_privmsg(pm: PrivmsgMessage) -> ChatMessage {
             text: rp.message_text,
         }),
     }
+}
+
+/// Parse the `gifs` IRC tag: `start-end|id|url[,start-end|id|url,...]`.
+///
+/// Indices are zero-based into the message text (inclusive end in Twitch's
+/// spec); we convert to Rust char slicing convention (exclusive end).
+/// Malformed entries are skipped silently — never fatal.
+fn parse_gifs_tag(raw: Option<&str>) -> Vec<GifRef> {
+    let Some(raw) = raw else { return Vec::new() };
+    let mut out = Vec::new();
+    for item in raw.split(',') {
+        let mut it = item.splitn(3, '|');
+        let (Some(range), Some(id), Some(url)) = (it.next(), it.next(), it.next()) else {
+            continue;
+        };
+        // range is "start-end"; +1 turns inclusive end into exclusive.
+        let Some((s, e)) = range.split_once('-') else {
+            continue;
+        };
+        let (Ok(start), Ok(end)) = (s.parse::<usize>(), e.parse::<usize>()) else {
+            continue;
+        };
+        let end_exclusive = end.saturating_add(1);
+        if end_exclusive <= start {
+            continue; // empty/inverted range
+        }
+        out.push(GifRef {
+            id: id.to_string(),
+            start,
+            end: end_exclusive,
+            url: url.to_string(),
+        });
+    }
+    out
 }
 
 /// Map a library USERNOTICE onto Quiver's event model.
@@ -213,6 +249,55 @@ mod tests {
         // Non-reply messages must carry None.
         let plain = map_privmsg(parse_line_to_privmsg(LINE));
         assert!(plain.reply_parent.is_none());
+    }
+
+    /// Official Twitch IRC-docs example: a Tier2/3 GIF Keyboard message.
+    /// Text is the GIF's name; the `gifs` tag gives position/id/signed URL.
+    /// Ground truth BY HAND: "[Y A Y Yes GIF by Djemilah Birnie]" is 34 chars
+    /// (indices 0..=33). Exclusive end = 34. Slice must equal the full name.
+    #[test]
+    fn maps_gifs_tag_from_documented_example() {
+        let line = format!(
+            "@{base};gifs=0-33|joSNxeswxuc74Juo8X|https://media4.giphy.com/media/joSNxeswxuc74Juo8X/giphy.gif :twitchdev!twitchdev@twitchdev.tmi.twitch.tv PRIVMSG #twitch :[Y A Y Yes GIF by Djemilah Birnie]",
+            base = USERNOTICE_BASE_TAGS
+        );
+        let irc = IRCMessage::parse(&line).expect("parses");
+        let pm = PrivmsgMessage::try_from(irc).expect("parses as privmsg");
+        let cm = map_privmsg(pm);
+
+        assert_eq!(cm.text, "[Y A Y Yes GIF by Djemilah Birnie]");
+        assert_eq!(cm.gifs.len(), 1);
+        let g = &cm.gifs[0];
+        assert_eq!(g.id, "joSNxeswxuc74Juo8X");
+        assert_eq!(g.start, 0);
+        assert_eq!(g.end, 34);
+        assert!(
+            g.url
+                .starts_with("https://media4.giphy.com/media/joSNxeswxuc74Juo8X/")
+        );
+        // The gif range must slice the whole name text.
+        assert_eq!(
+            &cm.text[g.start..g.end],
+            "[Y A Y Yes GIF by Djemilah Birnie]"
+        );
+    }
+
+    /// Ground truth BY HAND: malformed gif entries are skipped, valid ones kept.
+    #[test]
+    fn parses_gifs_tag_skipping_malformed_entries() {
+        let raw = "0-2|a|https://x/1,garbage,5-6|b|https://x/2,9-8|c|https://x/3";
+        let gifs = parse_gifs_tag(Some(raw));
+        assert_eq!(gifs.len(), 2, "only well-formed, non-inverted ranges kept");
+        assert_eq!(gifs[0].id, "a");
+        assert_eq!((gifs[0].start, gifs[0].end), (0, 3));
+        assert_eq!(gifs[1].id, "b");
+        // 9-8 inverts → skipped; 'garbage' lacks all pipes → skipped.
+        assert!(!gifs.iter().any(|g| g.id == "c"));
+    }
+
+    #[test]
+    fn no_gifs_tag_yields_empty() {
+        assert!(parse_gifs_tag(None).is_empty());
     }
 
     #[test]

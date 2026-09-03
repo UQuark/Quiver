@@ -115,24 +115,53 @@ function renderBadges(m) {
   return wrap;
 }
 
-// Split text on emote ranges: plain slices as text nodes, emote spans as imgs.
+// Build the inline GIF element: mp4 → looping muted <video>, else <img>.
+function gifElement(g, alt) {
+  const isMp4 = /\.mp4(\?|$)/i.test(g.url);
+  if (isMp4) {
+    const v = document.createElement("video");
+    v.className = "gif";
+    v.src = g.url;
+    v.muted = true;
+    v.autoplay = true;
+    v.loop = true;
+    v.playsInline = true;
+    return v;
+  }
+  const img = document.createElement("img");
+  img.className = "gif";
+  img.src = g.url;
+  img.alt = alt;
+  return img;
+}
+
+// Split text on emote AND gif ranges: plain slices as text nodes, ranges as
+// imgs (emotes) / gif media. Ranges are char-based, end-exclusive.
 function renderText(m) {
   const wrap = el("span", "text");
-  const emotes = [...(m.emotes || [])].sort((a, b) => a.start - b.start);
+  const ranges = [
+    ...(m.emotes || []).map((e) => ({ ...e, kind: "emote" })),
+    ...(m.gifs || []).map((g) => ({ ...g, kind: "gif" })),
+  ].sort((a, b) => a.start - b.start);
+
   let cursor = 0;
-  for (const e of emotes) {
-    if (e.start < cursor || e.end > m.text.length) continue; // malformed range
-    if (e.start > cursor) appendTokens(wrap, m.text.slice(cursor, e.start));
-    if (emoteFlags.twitch) {
-      const img = document.createElement("img");
-      img.className = "emote";
-      img.src = EMOTE_CDN.replace("{id}", encodeURIComponent(e.id));
-      img.alt = m.text.slice(e.start, e.end);
-      wrap.append(img);
-    } else if (!emoteFlags.unicode) {
-      // Both disabled: the code counts as an emoji — strip it.
+  for (const r of ranges) {
+    if (r.start < cursor || r.end > m.text.length) continue; // malformed/overlap
+    if (r.start > cursor) appendTokens(wrap, m.text.slice(cursor, r.start));
+    if (r.kind === "emote") {
+      if (emoteFlags.twitch) {
+        const img = document.createElement("img");
+        img.className = "emote";
+        img.src = EMOTE_CDN.replace("{id}", encodeURIComponent(r.id));
+        img.alt = m.text.slice(r.start, r.end);
+        wrap.append(img);
+      } else if (!emoteFlags.unicode) {
+        // Both disabled: the code counts as an emoji — strip it.
+      }
+    } else {
+      wrap.append(gifElement(r, m.text.slice(r.start, r.end)));
     }
-    cursor = e.end;
+    cursor = r.end;
   }
   if (cursor < m.text.length) appendTokens(wrap, m.text.slice(cursor));
   return wrap;

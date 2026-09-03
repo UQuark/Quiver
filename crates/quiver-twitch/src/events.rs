@@ -20,6 +20,18 @@ pub struct EmoteRef {
     pub end: usize,
 }
 
+/// A GIPHY GIF sent via Twitch's Tier2/3 GIF Keyboard.
+///
+/// Positioned like an emote: char indices, inclusive start / exclusive end.
+/// The URL is the signed GIPHY media URL from the wire tag — render as-is.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GifRef {
+    pub id: String,
+    pub start: usize,
+    pub end: usize,
+    pub url: String,
+}
+
 /// The parent message of a Twitch reply thread.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ReplyParent {
@@ -41,6 +53,8 @@ pub struct ChatMessage {
     pub color: Option<String>,
     pub badges: Vec<Badge>,
     pub emotes: Vec<EmoteRef>,
+    /// GIF positions (Twitch GIF Keyboard). Usually one; renders inline.
+    pub gifs: Vec<GifRef>,
     pub text: String,
     /// Present when this message is a Twitch reply thread member.
     pub reply_parent: Option<ReplyParent>,

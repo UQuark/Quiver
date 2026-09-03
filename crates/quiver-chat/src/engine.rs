@@ -11,7 +11,8 @@ use std::time::{Duration, Instant};
 
 use crate::filters::MsgKind;
 use quiver_twitch::{
-    Badge, ChatMessage, EmoteRef, Event, GiftSubEvent, MysteryGiftEvent, RaidEvent, SubEvent,
+    Badge, ChatMessage, EmoteRef, Event, GifRef, GiftSubEvent, MysteryGiftEvent, RaidEvent,
+    SubEvent,
 };
 use serde::Serialize;
 use tracing::warn;
@@ -138,6 +139,28 @@ impl From<&EmoteRef> for WireEmote {
     }
 }
 
+/// GIF position on the wire (Twitch GIF Keyboard). `start`/`end` are char
+/// indices into `text`, end EXCLUSIVE. URL is the signed GIPHY media URL —
+/// render as-is.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct WireGif {
+    pub id: String,
+    pub start: usize,
+    pub end: usize,
+    pub url: String,
+}
+
+impl From<&GifRef> for WireGif {
+    fn from(g: &GifRef) -> Self {
+        Self {
+            id: g.id.clone(),
+            start: g.start,
+            end: g.end,
+            url: g.url.clone(),
+        }
+    }
+}
+
 /// Reply thread header data on the wire.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct WireReplyParent {
@@ -175,6 +198,9 @@ pub struct RenderedMessage {
     pub reply_to: Option<WireReplyParent>,
     pub text: String,
     pub emotes: Vec<WireEmote>,
+    /// GIF positions; usually empty (backward-compatible wire).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub gifs: Vec<WireGif>,
     pub badges: Vec<WireBadge>,
 }
 
@@ -190,6 +216,7 @@ impl From<ChatMessage> for RenderedMessage {
             reply_to: cm.reply_parent.as_ref().map(WireReplyParent::from),
             text: cm.text,
             emotes: cm.emotes.iter().map(WireEmote::from).collect(),
+            gifs: cm.gifs.iter().map(WireGif::from).collect(),
             badges: cm.badges.iter().map(WireBadge::from).collect(),
         }
     }
@@ -411,6 +438,7 @@ mod tests {
             reply_to: None,
             text: "t".into(),
             emotes: vec![],
+            gifs: vec![],
             badges: vec![],
         }
     }
@@ -538,10 +566,25 @@ mod tests {
                 start: 4,
                 end: 9,
             }],
+            gifs: vec![GifRef {
+                id: "g1".into(),
+                start: 11,
+                end: 16,
+                url: "https://media.giphy.com/x".into(),
+            }],
             text: "hey Kappa world".into(),
             reply_parent: None,
         };
         let r = RenderedMessage::from(cm);
+        assert_eq!(
+            r.gifs,
+            vec![WireGif {
+                id: "g1".into(),
+                start: 11,
+                end: 16,
+                url: "https://media.giphy.com/x".into()
+            }]
+        );
         assert_eq!(
             r.emotes,
             vec![WireEmote {
