@@ -14,6 +14,12 @@ body {
 #chat {
   display: flex;
   flex-direction: column;
+  /* Anchor the message block to the bottom edge: DOM order stays
+     oldest→newest (prune/timeout work on the front), but content packs
+     to the bottom. When the oldest is removed the batch stays glued to
+     the bottom — no visual jump. Overflow clips at the TOP, newest
+     message always visible at the bottom edge. */
+  justify-content: flex-end;
   gap: 4px;
   padding: 8px;
   overflow: hidden;
