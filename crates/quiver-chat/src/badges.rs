@@ -36,6 +36,10 @@ pub struct ResolvedCustomBadges {
     pub definitions: HashMap<String, ResolvedBadge>,
     pub per_role: HashMap<String, Vec<String>>,
     pub per_user: HashMap<String, Vec<String>>,
+    /// Hide Twitch native badges for users with a matching badge set id.
+    pub hide_native_by_role: HashMap<String, bool>,
+    /// Hide Twitch native badges for a specific user id or login.
+    pub hide_native_by_user: HashMap<String, bool>,
 }
 
 // ---- cache internals ----------------------------------------------------
@@ -341,6 +345,8 @@ pub async fn resolve_full(
             definitions,
             per_role: cfg.per_role.clone(),
             per_user: cfg.per_user.clone(),
+            hide_native_by_role: cfg.hide_native_by_role.clone(),
+            hide_native_by_user: cfg.hide_native_by_user.clone(),
         },
         index,
         cache_dir,
@@ -501,6 +507,8 @@ mod tests {
             definitions: defs,
             per_role,
             per_user,
+            hide_native_by_role: HashMap::new(),
+            hide_native_by_user: HashMap::new(),
         };
 
         // Mod with user_id=42: badges from both role("a"p20 + "b"p10) and user("c"p10).
@@ -533,6 +541,8 @@ mod tests {
             definitions: defs,
             per_role: HashMap::new(),
             per_user: HashMap::new(),
+            hide_native_by_role: HashMap::new(),
+            hide_native_by_user: HashMap::new(),
         };
         let merged = merge_badges(&badges, &[], "0", "user0");
         assert!(merged.is_empty());

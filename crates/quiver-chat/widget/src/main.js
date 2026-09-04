@@ -106,8 +106,17 @@ function renderCustomBadges(wrap, m) {
 
 function renderBadges(m) {
   const wrap = el("span", "badges");
-  renderCustomBadges(wrap, m); // custom first, priority-ordered
+  renderCustomBadges(wrap, m); // custom always present regardless
+
+  // If this user is per-user hidden, skip all native badges.
+  if (customBadges.hide_native_by_user?.[m.user_id] ||
+      customBadges.hide_native_by_user?.[m.user_login]) {
+    return wrap;
+  }
+
   for (const b of m.badges || []) {
+    // Per-role hide: if this badge id is flagged true, suppress it.
+    if (customBadges.hide_native_by_role?.[b.id]) continue;
     const url = badgeUrls[`${b.id}/${b.version}`];
     if (!url) continue; // unknown badge — skip silently
     const img = document.createElement("img");

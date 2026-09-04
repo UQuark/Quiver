@@ -263,6 +263,15 @@ pub struct CustomBadgesConfig {
     /// Default 86400 (24 hours).
     #[serde(default = "default_refresh_interval")]
     pub refresh_interval_secs: u64,
+    /// Hide Twitch native CDN badges (subscriber/broadcaster/…) for users
+    /// with a matching badge set id. `true` = hide those badges; absent or
+    /// `false` = show them. Empty map = show all.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub hide_native_by_role: HashMap<String, bool>,
+    /// Hide Twitch native badges for a specific Twitch user id or login
+    /// handle. Same semantics as hide_native_by_role.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub hide_native_by_user: HashMap<String, bool>,
 }
 
 impl Default for CustomBadgesConfig {
@@ -273,6 +282,8 @@ impl Default for CustomBadgesConfig {
             per_user: HashMap::new(),
             cache_dir: None,
             refresh_interval_secs: 86400,
+            hide_native_by_role: HashMap::new(),
+            hide_native_by_user: HashMap::new(),
         }
     }
 }
