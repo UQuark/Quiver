@@ -186,6 +186,22 @@ fn emit_field(
     Ok(())
 }
 
+/// Detect a schemars unit-enum node. schemars emits forms depending on
+/// context — accept all: a bare `enum` list, `oneOf` of const-bearing
+/// variants, or a direct `const`.
+fn has_enum_const(schema_node: &serde_json::Value) -> bool {
+    if schema_node.get("const").is_some() {
+        return true;
+    }
+    if schema_node.get("enum").and_then(|v| v.as_array()).is_some() {
+        return true;
+    }
+    if let Some(one_of) = schema_node.get("oneOf").and_then(|v| v.as_array()) {
+        return one_of.iter().any(|v| v.get("const").is_some());
+    }
+    false
+}
+
 /// Nullability detection: schemars renders Option<T> fields as either
 /// `"type": ["T","null"]` or anyOf [T, null] depending on version shape.
 fn is_nullable(schema_node: &serde_json::Value) -> bool {
@@ -327,7 +343,17 @@ fn emit_value(
             push_indent(out, indent);
             out.push(']');
         }
-        serde_json::Value::String(s) => out.push_str(&escape_ron_string(s)),
+        serde_json::Value::String(s) => {
+            // Unit enums serialize as strings but RON wants a BARE identifier
+            // (rename_all maps variant -> lowercase). The schema decides:
+            // schemars 1.x renders them as oneOf[{type:string, const:...}].
+            let is_enum = has_enum_const(schema_node);
+            if is_enum {
+                out.push_str(s);
+            } else {
+                out.push_str(&escape_ron_string(s));
+            }
+        }
         serde_json::Value::Number(n) => out.push_str(&n.to_string()),
         serde_json::Value::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
         serde_json::Value::Null => {

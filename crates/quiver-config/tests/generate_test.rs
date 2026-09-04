@@ -19,10 +19,21 @@ struct Fixture {
     /// Skipped-when-none field; generator must still surface it.
     #[serde(skip_serializing_if = "Option::is_none")]
     hidden: Option<u32>,
+    /// Unit enum: serializes as string, RON wants bare identifier.
+    #[serde(default)]
+    mode: Mode,
     /// Nested group with its own docs.
     inner: Inner,
     /// Free-form labels.
     labels: std::collections::HashMap<String, String>,
+}
+
+#[derive(Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+enum Mode {
+    #[default]
+    Prune,
+    Scroll,
 }
 
 #[derive(Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -55,6 +66,8 @@ fn generated_output_matches_hand_written_golden() {
     data_dir: None,
     // Skipped-when-none field; generator must still surface it.
     hidden: None,
+    // Unit enum: serializes as string, RON wants bare identifier.
+    mode: prune,
     // Nested group with its own docs.
     inner: (
         // A name inside a nested struct.

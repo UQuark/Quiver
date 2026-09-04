@@ -395,6 +395,7 @@ pub(crate) fn meta_value(
         "theme": {
             "font_size_px": live.theme.font_size_px,
             "max_messages": live.theme.max_messages,
+            "overflow_mode": live.theme.overflow_mode,
         },
         "badges": badges,
         "custom_css": live.theme.custom_css,
@@ -602,6 +603,7 @@ mod tests {
                 message_lifetime_secs: 60,
                 custom_css: custom.map(str::to_string),
                 role_css: role,
+                overflow_mode: crate::config::OverflowMode::Prune,
             },
             emotes: EmotesConfig::default(),
         }

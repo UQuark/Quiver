@@ -142,6 +142,7 @@ mod tests {
                 message_lifetime_secs: lifetime,
                 custom_css: None,
                 role_css: None,
+                overflow_mode: crate::config::OverflowMode::Prune,
             },
             emotes: EmotesConfig::default(),
             filters: crate::config::FiltersConfig::default(),

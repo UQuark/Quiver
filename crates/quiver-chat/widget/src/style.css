@@ -14,6 +14,16 @@ body {
   overflow: hidden;
 }
 
+/* Scroll overflow mode: pinned-to-bottom scrollable chat, scrollbar hidden
+   (programmatic scrollTop; custom_css can restyle). */
+#chat.overflow-scroll {
+  overflow-y: auto;
+  scrollbar-width: none; /* Firefox */
+}
+#chat.overflow-scroll::-webkit-scrollbar {
+  display: none; /* Chromium / OBS CEF */
+}
+
 .msg {
   display: flex;
   flex-wrap: wrap; /* lets the reply header take its own full-width line */

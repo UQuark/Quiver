@@ -135,6 +135,23 @@ pub struct ThemeConfig {
     /// moderator, vip, subscriber, founder.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub role_css: Option<HashMap<String, String>>,
+    /// What happens when messages overflow the container height:
+    /// `prune` removes oldest messages until everything fits (OBS
+    /// default), `scroll` pins a scrollable chat to the bottom.
+    #[serde(default)]
+    pub overflow_mode: OverflowMode,
+}
+
+/// Container overflow behavior. Default: prune (tight chat, no scrollbar).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum OverflowMode {
+    /// Remove oldest `.msg` nodes until the container fits. Event banners
+    /// and the newest message are never pruned.
+    #[default]
+    Prune,
+    /// Keep messages until the count cap; scroll pinned to the bottom.
+    Scroll,
 }
 
 /// Lint user CSS through a real parser (lightningcss).
@@ -177,6 +194,7 @@ impl Default for ThemeConfig {
             message_lifetime_secs: 60,
             custom_css: None,
             role_css: None,
+            overflow_mode: OverflowMode::Prune,
         }
     }
 }

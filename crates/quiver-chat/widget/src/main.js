@@ -229,11 +229,27 @@ function renderMessage(m) {
     row.append(el("span", "sep", ":"));
     row.append(renderText(m));
   }
+  watchHeight(row); // re-measure when media loads / role CSS resizes
   return row;
 }
 
 function trimTo(max) {
-  while (chat.children.length > max) chat.firstElementChild?.remove();
+  // Count-cap is a SANITY layer: only .msg nodes count (event banners
+  // are never trimmed here), newest message always kept.
+  let msgs = 0;
+  for (const child of chat.children) {
+    if (child.classList.contains("msg")) msgs++;
+  }
+  if (msgs <= max) return;
+  // Remove oldest .msg nodes first (banners untouched).
+  for (const child of chat.children) {
+    if (msgs <= max) break;
+    if (child.classList.contains("msg")) {
+      unwatchHeight(child);
+      child.remove();
+      msgs--;
+    }
+  }
 }
 
 function expire(ids) {
@@ -241,14 +257,78 @@ function expire(ids) {
     const node = chat.querySelector(`[data-id="${CSS.escape(id)}"]`);
     if (!node) continue;
     node.classList.add("expiring");
-    setTimeout(() => node.remove(), EXPIRE_FADE_MS);
+    setTimeout(() => {
+      unwatchHeight(node);
+      node.remove();
+    }, EXPIRE_FADE_MS);
   }
 }
 
 // A moderator/streamer deleted the message — hide it outright (no fade).
 function removeMessage(id) {
   const node = chat.querySelector(`[data-id="${CSS.escape(id)}"]`);
-  if (node) node.remove();
+  if (node) {
+    unwatchHeight(node);
+    node.remove();
+  }
+}
+
+// ---- height-based overflow management ----------------------------------
+// Layered on top of the count cap: prune mode removes oldest .msg nodes
+// until the container fits; scroll mode pins a scrollable chat bottom.
+// Guard rails: newest message never pruned, .event banners never pruned.
+
+let overflowMode = "prune"; // from meta.theme
+const overflowWatch = new ResizeObserver(() => settleOverflow());
+
+function applyOverflowMode(mode) {
+  overflowMode = mode === "scroll" ? "scroll" : "prune";
+  chat.classList.toggle("overflow-scroll", overflowMode === "scroll");
+}
+
+function watchHeight(node) {
+  overflowWatch.observe(node);
+}
+
+function unwatchHeight(node) {
+  overflowWatch.unobserve(node);
+}
+
+function countMsgs() {
+  let n = 0;
+  for (const c of chat.children) if (c.classList.contains("msg")) n++;
+  return n;
+}
+
+// The one decision point: re-measure and react to height changes.
+function settleOverflow() {
+  // Scroll mode: pin to bottom (only when already pinned / overflowing).
+  if (overflowMode === "scroll") {
+    const pinned =
+      chat.scrollTop + chat.clientHeight >= chat.scrollHeight - 1 ||
+      chat.scrollTop === 0;
+    if (pinned && chat.scrollHeight > chat.clientHeight) {
+      chat.scrollTop = chat.scrollHeight;
+    }
+    return;
+  }
+
+  // Prune mode: while content overflows AND more than one .msg exists,
+  // drop the oldest .msg (banners and the newest message survive).
+  let guard = 100; // bound the loop (safety against pathological heights)
+  while (
+    chat.scrollHeight > chat.clientHeight + 1 &&
+    countMsgs() > 1 &&
+    guard-- > 0
+  ) {
+    for (const c of chat.children) {
+      if (c.classList.contains("msg")) {
+        unwatchHeight(c);
+        c.remove();
+        break;
+      }
+    }
+  }
 }
 
 function applyMeta(meta) {
@@ -263,6 +343,7 @@ function applyMeta(meta) {
   if (meta.theme) {
     if (meta.theme.font_size_px) chat.style.fontSize = `${meta.theme.font_size_px}px`;
     if (meta.theme.max_messages) maxMessages = meta.theme.max_messages;
+    if (meta.theme.overflow_mode) applyOverflowMode(meta.theme.overflow_mode);
   }
   applyUserStyles(meta.role_css, meta.custom_css);
 }
@@ -351,11 +432,14 @@ function handle(wire) {
   switch (wire.type) {
     case "snapshot":
       applyMeta(wire.meta);
+      for (const c of chat.children) unwatchHeight(c);
       chat.replaceChildren(...(wire.messages || []).map(renderMessage));
+      requestAnimationFrame(settleOverflow);
       break;
     case "message":
       chat.append(renderMessage(wire.message));
       trimTo(maxMessages);
+      requestAnimationFrame(settleOverflow);
       break;
     case "expire":
       expire(wire.ids || []);
@@ -372,6 +456,7 @@ function handle(wire) {
       break;
     case "clear":
       // Channel swapped: history wiped server-side.
+      for (const c of chat.children) unwatchHeight(c);
       chat.replaceChildren();
       break;
     case "reload":
@@ -403,4 +488,7 @@ function connect() {
 
 const bootMs = Date.now();
 const chat = document.getElementById("chat");
+// Container resize (OBS changing source size/DPI) re-triggers overflow logic.
+overflowWatch.observe(chat);
+applyOverflowMode("prune"); // applied from meta on first snapshot
 connect();
