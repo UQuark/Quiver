@@ -6,12 +6,21 @@ body {
   color: #efeff1;
 }
 
+/* Filled-box sizing everywhere: height caps include padding cleanly. */
+* {
+  box-sizing: border-box;
+}
+
 #chat {
   display: flex;
   flex-direction: column;
   gap: 4px;
   padding: 8px;
   overflow: hidden;
+  /* Fill the OBS viewport exactly so clientHeight is the source height
+     and scrollHeight is the content height — overflow becomes measurable.
+     Without this the container grows with content and prune never fires. */
+  height: 100vh;
 }
 
 /* Scroll overflow mode: pinned-to-bottom scrollable chat, scrollbar hidden
