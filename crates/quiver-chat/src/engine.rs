@@ -414,6 +414,15 @@ pub async fn pump(
                     let frame = serde_json::json!({ "type": "delete", "id": message_id });
                     let _ = tx.send(frame.to_string());
                 }
+                Some(Event::ChatCleared) => {
+                    // Whole chat cleared by a moderator: empty history and
+                    // tell clients to wipe — same wire shape as a channel
+                    // swap, which the widget already handles.
+                    if let Ok(mut st) = state.lock() {
+                        st.clear();
+                    }
+                    let _ = tx.send(r#"{"type":"clear"}"#.to_string());
+                }
                 Some(Event::Raid(r)) => {
                     if permitted(&filters, MsgKind::Raid, &r.from_login, &r.from_display_name, "", &[], "") {
                         send_event(&tx, r);

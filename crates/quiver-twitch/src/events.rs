@@ -118,6 +118,12 @@ pub struct MessageDeleted {
     pub sender_login: String,
 }
 
+/// The ENTIRE chat was cleared by a moderator. From IRC `CLEARCHAT`
+/// with no user target. `UserBanned`/`UserTimedOut` actions are not
+/// surfaced (their deletions arrive as CLEARMSG frames separately).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ChatCleared;
+
 /// Events surfaced by a chat source.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Event {
@@ -128,6 +134,8 @@ pub enum Event {
     Raid(RaidEvent),
     /// A message was deleted by a moderator/streamer (IRC CLEARMSG).
     MessageDeleted(MessageDeleted),
+    /// The whole chat was cleared (IRC CLEARCHAT, ChatCleared action).
+    ChatCleared,
     /// Server PING. Answered internally by the library; informational only.
     Ping(String),
     /// Anything not yet modeled (JOIN/PART/NOTICE/USERNOTICE/...).

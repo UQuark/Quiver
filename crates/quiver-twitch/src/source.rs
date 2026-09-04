@@ -62,6 +62,13 @@ impl IrcChatSource {
                         sender_login: cm.sender_login,
                     }));
                 }
+                ServerMessage::ClearChat(cc) => {
+                    // Only a WIDE clear empties the whole chat — bans/timeouts
+                    // arrive as per-message CLEARMSG deletions instead.
+                    if let twitch_irc::message::ClearChatAction::ChatCleared = cc.action {
+                        return Some(Event::ChatCleared);
+                    }
+                }
                 ServerMessage::UserNotice(un) => return Some(map_user_notice(un)),
                 ServerMessage::Ping(ping) => {
                     // PingMessage keeps only the raw IRC frame; the token is
@@ -486,6 +493,22 @@ mod tests {
                 assert_eq!(ev.sender_login, "offender");
             }
             other => panic!("expected ClearMsg, got {other:?}"),
+        }
+    }
+
+    /// Ground truth BY HAND: parameterless CLEARCHAT = full chat cleared.
+    #[test]
+    fn maps_clearchat_chatcleared() {
+        let line = "@room-id=123;tmi-sent-ts=1783632907018 :tmi.twitch.tv CLEARCHAT #likh_tar";
+        let irc = IRCMessage::parse(line).expect("parses");
+        match ServerMessage::try_from(irc).expect("parses as ServerMessage") {
+            ServerMessage::ClearChat(cc) => {
+                assert!(matches!(
+                    cc.action,
+                    twitch_irc::message::ClearChatAction::ChatCleared
+                ));
+            }
+            other => panic!("expected ClearChat, got {other:?}"),
         }
     }
 
