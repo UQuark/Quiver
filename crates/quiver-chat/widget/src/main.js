@@ -238,13 +238,12 @@ function renderMessage(m) {
     row.append(header);
   }
 
-  row.append(renderBadges(m));
-
-  // Name + separator + text share ONE wrapping container so word-wrap
-  // happens INSIDE the body (beside the name), never by dropping the
-  // whole text block onto its own line. Flex items wrap at hypothetical
-  // size, so a separate .text flex item was always at risk of that.
+  // Name + badges + separator + text share ONE wrapping container so
+  // word-wrap happens INSIDE the body (beside the name) and badges can
+  // never wrap away from the username — they are contiguous inline
+  // content with no break point between them.
   const body = el("span", "body");
+  body.append(renderBadges(m));
   const user = el("span", "user", m.display_name);
   if (m.color) user.style.color = m.color;
   body.append(user);

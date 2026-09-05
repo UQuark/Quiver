@@ -552,19 +552,60 @@ async fn static_fallback(State(state): State<AppState>, req: Request) -> Respons
         full.push("index.html");
     }
     match std::fs::read(&full) {
-        Ok(bytes) => (
-            [
-                (header::CONTENT_TYPE, mime_of(&full)),
-                // Reloads must always pull fresh bytes from disk — without
-                // this, Chromium heuristically caches main.js and a stale
-                // copy keeps rendering no matter how many reloads fire.
-                (header::CACHE_CONTROL, "no-cache"),
-            ],
-            bytes,
-        )
-            .into_response(),
+        Ok(bytes) => {
+            // Cache-busting: bake the widget dir's newest mtime into the
+            // asset URLs in index.html. A cache that ignores no-cache
+            // still cannot serve a stale file across a DIFFERENT URL.
+            let body = if full.ends_with("index.html") && dist.is_dir() {
+                String::from_utf8_lossy(&bytes).replace(
+                    "__QUIVER_VERSION__",
+                    &quiver_widget_version(&dist).to_string(),
+                )
+            } else {
+                String::from_utf8_lossy(&bytes).into_owned()
+            };
+            (
+                [
+                    (header::CONTENT_TYPE, mime_of(&full)),
+                    // Reloads must always pull fresh bytes from disk — without
+                    // this, Chromium heuristically caches main.js and a stale
+                    // copy keeps rendering no matter how many reloads fire.
+                    (header::CACHE_CONTROL, "no-cache"),
+                    // Legacy CEF builds may not trust no-cache alone.
+                    (header::PRAGMA, "no-cache"),
+                    (header::EXPIRES, "0"),
+                ],
+                body,
+            )
+                .into_response()
+        }
         Err(_) => (StatusCode::NOT_FOUND, "not found").into_response(),
     }
+}
+
+/// Newest mtime (epoch millis) of any file under the widget dir
+/// (recursive — assets live in subdirs like src/) — the cache-busting
+/// version for asset URLs.
+fn quiver_widget_version(dist: &Path) -> u64 {
+    let mut newest = 0u64;
+    let mut stack: Vec<PathBuf> = vec![dist.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        if let Ok(entries) = std::fs::read_dir(&dir) {
+            for entry in entries.flatten() {
+                if let Ok(meta) = entry.metadata() {
+                    if meta.is_dir() {
+                        stack.push(entry.path());
+                    } else if meta.is_file()
+                        && let Ok(t) = meta.modified()
+                        && let Ok(ms) = t.duration_since(std::time::UNIX_EPOCH)
+                    {
+                        newest = newest.max(ms.as_millis() as u64);
+                    }
+                }
+            }
+        }
+    }
+    newest
 }
 
 fn mime_of(path: &Path) -> &'static str {

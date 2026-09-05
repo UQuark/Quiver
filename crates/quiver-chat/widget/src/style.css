@@ -129,7 +129,6 @@ body {
 .badges {
   display: inline-flex;
   gap: 2px;
-  align-self: center;
 }
 
 .badge {
