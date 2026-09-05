@@ -308,6 +308,26 @@ fn now_epoch_secs() -> u64 {
 
 // ---- public resolution API ----------------------------------------------
 
+/// Resolve ONE definition: file:// as a passthrough route, http(s) via the
+/// cache. Failing URIs return Err — callers decide to skip, never propagate.
+async fn resolve_definition(
+    defn: &crate::config::CustomBadgeDefinition,
+    http: &reqwest::Client,
+    index: &mut Index,
+    cache_dir: &Path,
+    refresh_interval: Duration,
+    file_badges: &mut HashMap<String, PathBuf>,
+) -> Result<String, String> {
+    if defn.uri.starts_with("file://") {
+        let canonical = resolve_file(&defn.uri)?;
+        let uh = uri_hash(&defn.uri);
+        file_badges.insert(uh.clone(), PathBuf::from(&canonical));
+        Ok(format!("/badge-file/{uh}"))
+    } else {
+        resolve_http(&defn.uri, http, index, cache_dir, refresh_interval).await
+    }
+}
+
 /// Resolve all definitions and wrap with cache state.
 pub async fn resolve_full(
     cfg: &CustomBadgesConfig,
@@ -320,13 +340,25 @@ pub async fn resolve_full(
     let mut file_badges = HashMap::new();
 
     for (id, defn) in &cfg.definitions {
-        let local_url = if defn.uri.starts_with("file://") {
-            let canonical = resolve_file(&defn.uri)?;
-            let uh = uri_hash(&defn.uri);
-            file_badges.insert(uh.clone(), PathBuf::from(&canonical));
-            format!("/badge-file/{uh}")
-        } else {
-            resolve_http(&defn.uri, http, &mut index, &cache_dir, refresh_interval).await?
+        // Definitions are independent: one failing URI must NOT brick the
+        // set. Resolve individually; failures skip with a WARN, healthy
+        // ones still apply (user may pre-wire a badge before the file/URL
+        // exists — it appears as soon as it resolves on a later reload).
+        let local_url = match resolve_definition(
+            defn,
+            http,
+            &mut index,
+            &cache_dir,
+            refresh_interval,
+            &mut file_badges,
+        )
+        .await
+        {
+            Ok(url) => url,
+            Err(e) => {
+                tracing::warn!(badge = %id, error = %e, "badge definition failed to resolve — skipping");
+                continue;
+            }
         };
         definitions.insert(
             id.clone(),
@@ -458,6 +490,58 @@ mod tests {
     #[test]
     fn file_not_found_returns_err() {
         assert!(resolve_file("file:///nonexistent/path.png").is_err());
+    }
+
+    /// Ground truth BY HAND: one bad + one good definition — the good one
+    /// resolves, the bad one is skipped, the set is NOT bricked.
+    #[tokio::test]
+    async fn failing_definition_skipped_healthy_ones_still_resolve() {
+        let tmp = tempfile::tempdir().unwrap();
+        let good = tmp.path().join("good.png");
+        std::fs::write(&good, b"fake png").unwrap();
+        let missing = tmp.path().join("missing.png"); // does NOT exist
+
+        let cfg = crate::config::CustomBadgesConfig {
+            definitions: {
+                let mut d = HashMap::new();
+                d.insert(
+                    "good".into(),
+                    crate::config::CustomBadgeDefinition {
+                        uri: format!("file://{}", good.display()),
+                        priority: 10,
+                        height: 24,
+                        label: None,
+                    },
+                );
+                d.insert(
+                    "bad".into(),
+                    crate::config::CustomBadgeDefinition {
+                        uri: format!("file://{}", missing.display()),
+                        priority: 20,
+                        height: 24,
+                        label: None,
+                    },
+                );
+                d
+            },
+            per_role: HashMap::new(),
+            per_user: HashMap::new(),
+            cache_dir: Some(tmp.path().join("cache")),
+            refresh_interval_secs: 60,
+            hide_native_by_role: HashMap::new(),
+            hide_native_by_user: HashMap::new(),
+        };
+
+        let http = reqwest::Client::new();
+        let state = resolve_full(&cfg, &http).await.expect("batch resolves OK");
+        assert_eq!(state.resolved.definitions.len(), 1, "only healthy kept");
+        assert!(state.resolved.definitions.contains_key("good"));
+        assert!(
+            state.resolved.definitions["good"]
+                .url
+                .starts_with("/badge-file/")
+        );
+        assert!(!state.resolved.definitions.contains_key("bad"));
     }
 
     #[test]
