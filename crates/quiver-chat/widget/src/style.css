@@ -44,7 +44,10 @@ body {
   flex-wrap: wrap; /* lets the reply header take its own full-width line */
   gap: 6px;
   align-items: baseline;
-  word-break: break-word;
+  /* Wrap at word boundaries (spaces) first; only break mid-token when a
+     single word exceeds the available width (long URLs etc). */
+  word-break: normal;
+  overflow-wrap: anywhere;
   animation: msg-in 180ms ease-out;
   /* Every message is a card. Translucent so OBS scene shows through. */
   background: rgba(28, 28, 33, 0.5);
@@ -78,6 +81,42 @@ body {
 
 .sep {
   opacity: 0.6;
+}
+
+/* Inline padding for the classic "Name: message" rhythm — inline layout
+   ignores flex gap, so spacing comes from margins on the inline spans. */
+.user {
+  margin-right: 4px;
+}
+
+.sep {
+  margin-right: 6px;
+  margin-left: 2px;
+  opacity: 0.6;
+}
+
+/* The row's flexible, shrinkable flex item: name + separator + text live
+   inside it, so wrapping happens within this block (beside the name)
+   rather than by dropping the text span onto its own line. Inline
+   content wraps at spaces; overflow-wrap handles long unbroken tokens. */
+.body {
+  display: inline;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.text {
+  /* Wrap at word boundaries first; break mid-token only when a single
+     token exceeds the available width. */
+  word-break: normal;
+  overflow-wrap: anywhere;
+}
+
+/* Twitch prepends "@parent " to reply text; parent is rendered above,
+   so this segment is intentionally invisible (not sliced — emote/gif
+   ranges index the original string). */
+.reply-mention-prefix {
+  display: none;
 }
 
 .msg.action {

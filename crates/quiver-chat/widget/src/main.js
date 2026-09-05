@@ -157,7 +157,31 @@ function renderText(m) {
     ...(m.gifs || []).map((g) => ({ ...g, kind: "gif" })),
   ].sort((a, b) => a.start - b.start);
 
+  // Reply threads: Twitch prepends "@<parent> " to the message. We render
+  // the parent above, so hide that prefix (display:none) — ranges for
+  // emotes/gifs index against the ORIGINAL text, so the segment must stay
+  // in place, invisible, not sliced away. Only strip when the prefix
+  // matches the actual parent (never mangle a different @mention).
   let cursor = 0;
+  if (m.reply_to && m.text.startsWith("@")) {
+    const pre = /^@(\S+)/.exec(m.text);
+    if (pre) {
+      const id = pre[1].toLowerCase();
+      const matchesParent =
+        id === m.reply_to.user_login.toLowerCase() ||
+        id === m.reply_to.display_name.toLowerCase();
+      if (matchesParent) {
+        let end = pre[0].length;
+        if (m.text[end] === " ") end++;
+        const hidden = document.createElement("span");
+        hidden.className = "reply-mention-prefix";
+        hidden.textContent = m.text.slice(0, end);
+        wrap.append(hidden);
+        cursor = end;
+      }
+    }
+  }
+
   for (const r of ranges) {
     if (r.start < cursor || r.end > m.text.length) continue; // malformed/overlap
     if (r.start > cursor) appendTokens(wrap, m.text.slice(cursor, r.start));
@@ -216,19 +240,24 @@ function renderMessage(m) {
 
   row.append(renderBadges(m));
 
+  // Name + separator + text share ONE wrapping container so word-wrap
+  // happens INSIDE the body (beside the name), never by dropping the
+  // whole text block onto its own line. Flex items wrap at hypothetical
+  // size, so a separate .text flex item was always at risk of that.
+  const body = el("span", "body");
   const user = el("span", "user", m.display_name);
   if (m.color) user.style.color = m.color;
-  row.append(user);
+  body.append(user);
 
   if (m.is_action) {
     // /me lines: whole line italic in the sender's color, no separator.
     row.classList.add("action");
     if (m.color) row.style.color = m.color;
-    row.append(renderText(m));
   } else {
-    row.append(el("span", "sep", ":"));
-    row.append(renderText(m));
+    body.append(el("span", "sep", ":"));
   }
+  body.append(renderText(m));
+  row.append(body);
   watchHeight(row); // re-measure when media loads / role CSS resizes
   return row;
 }
