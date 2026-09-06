@@ -444,8 +444,101 @@ fn snapshot_frame(app: &AppState) -> Option<String> {
 
 // ---- handlers -------------------------------------------------------------
 
-async fn ws_handler(State(state): State<AppState>, ws: WebSocketUpgrade) -> impl IntoResponse {
+/// Origin policy for the WebSocket feed.
+///
+/// The widget always connects same-origin (`${location.host}/ws`, main.js),
+/// so a cross-origin upgrade is either a misconfigured custom client or CSWSH
+/// (cross-site WebSocket hijacking): a web page from elsewhere opening
+/// `ws://<host>:<port>/ws` and streaming the raw chat feed. Browsers send
+/// `Origin` on every WebSocket handshake, so its absence is also rejected.
+fn is_allowed_origin(origin: Option<&header::HeaderValue>, listen: &str) -> bool {
+    let Some(origin) = origin.and_then(|o| o.to_str().ok()) else {
+        return false;
+    };
+    let Some((listen_host, listen_port)) = parse_listen(listen) else {
+        return false;
+    };
+    let Some(origin) = parse_origin(origin) else {
+        return false;
+    };
+    if origin.port != listen_port {
+        return false;
+    }
+    match listen_host.as_str() {
+        // All interfaces: LAN clients can legitimately use any hostname, so
+        // only port equality is enforced (documented relaxation).
+        "" | "0.0.0.0" | "::" => true,
+        // Loopback-bound listener: only loopback origins. This kills CSWSH
+        // in the default topology even though an attacker can guess the port.
+        h if is_loopback_host(h) => is_loopback_host(origin.host),
+        // Concrete non-loopback address: require an exact host match.
+        h => h == origin.host.to_ascii_lowercase(),
+    }
+}
+
+struct Origin<'a> {
+    host: &'a str,
+    port: u16,
+}
+
+/// "host:port" (or "[v6]:port") → (normalized host, port).
+fn parse_listen(s: &str) -> Option<(String, u16)> {
+    let s = s.trim();
+    if let Some(rest) = s.strip_prefix('[') {
+        let (host, after) = rest.split_once(']')?;
+        let port = after.strip_prefix(':')?.parse().ok()?;
+        return Some((host.to_ascii_lowercase(), port));
+    }
+    let (host, port) = s.rsplit_once(':')?;
+    Some((host.to_ascii_lowercase(), port.parse().ok()?))
+}
+
+/// "http[s]://host[:port]" → host + port (scheme default when omitted).
+fn parse_origin(s: &str) -> Option<Origin<'_>> {
+    let (rest, is_https) = if let Some(r) = s.strip_prefix("https://") {
+        (r, true)
+    } else if let Some(r) = s.strip_prefix("http://") {
+        (r, false)
+    } else {
+        return None;
+    };
+    let (host, explicit) = split_host_port(rest);
+    let port = explicit.unwrap_or(if is_https { 443 } else { 80 });
+    Some(Origin { host, port })
+}
+
+/// "host", "host:port", "[v6]", "[v6]:port" → (host, explicit port).
+fn split_host_port(s: &str) -> (&str, Option<u16>) {
+    if let Some(rest) = s.strip_prefix('[') {
+        match rest.split_once(']') {
+            Some((host, after)) => (host, after.strip_prefix(':').and_then(|p| p.parse().ok())),
+            None => (s, None),
+        }
+    } else {
+        match s.rsplit_once(':') {
+            Some((host, port)) => (host, port.parse().ok()),
+            None => (s, None),
+        }
+    }
+}
+
+fn is_loopback_host(host: &str) -> bool {
+    let h = host.to_ascii_lowercase();
+    h == "localhost" || h == "::1" || h.starts_with("127.")
+}
+
+async fn ws_handler(
+    State(state): State<AppState>,
+    ws: WebSocketUpgrade,
+    req: Request,
+) -> Response {
+    let listen = state.live.read().unwrap().listen.clone();
+    if !is_allowed_origin(req.headers().get(header::ORIGIN), &listen) {
+        warn!("cross-origin websocket upgrade denied");
+        return (StatusCode::FORBIDDEN, "cross-origin websocket denied").into_response();
+    }
     ws.on_upgrade(move |socket| handle_socket(socket, state))
+        .into_response()
 }
 
 async fn handle_socket(mut socket: WebSocket, state: AppState) {
@@ -748,5 +841,51 @@ mod tests {
         let m = meta_value(&live, &HashMap::new(), None, None);
         assert!(m["custom_css"].is_null());
         assert!(m["role_css"].is_null());
+    }
+
+    #[test]
+    fn ws_origin_loopback_policy() {
+        let h = |o: &str| header::HeaderValue::from_str(o).unwrap();
+        let def = "127.0.0.1:4783";
+        assert!(is_allowed_origin(Some(&h("http://localhost:4783")), def));
+        assert!(is_allowed_origin(Some(&h("http://127.0.0.1:4783")), def));
+        assert!(is_allowed_origin(Some(&h("http://[::1]:4783")), def));
+        assert!(!is_allowed_origin(Some(&h("http://evil.example:4783")), def));
+        assert!(!is_allowed_origin(Some(&h("http://localhost:9999")), def));
+        assert!(!is_allowed_origin(Some(&h("http://evil.example:9999")), def));
+        // No Origin header (non-browser client) is rejected outright.
+        assert!(!is_allowed_origin(None, def));
+        // Malformed origin strings are rejected.
+        assert!(!is_allowed_origin(Some(&h("127.0.0.1:4783")), def));
+        assert!(!is_allowed_origin(Some(&h("ftp://localhost:4783")), def));
+    }
+
+    #[test]
+    fn ws_origin_all_interfaces_relaxes_host_but_keeps_port() {
+        let h = |o: &str| header::HeaderValue::from_str(o).unwrap();
+        let any = "0.0.0.0:4783";
+        assert!(is_allowed_origin(Some(&h("http://192.168.1.10:4783")), any));
+        assert!(!is_allowed_origin(Some(&h("http://192.168.1.10:1337")), any));
+        assert!(!is_allowed_origin(None, any));
+    }
+
+    #[test]
+    fn ws_origin_concrete_host_requires_exact_match() {
+        let h = |o: &str| header::HeaderValue::from_str(o).unwrap();
+        let lan = "192.168.1.5:4783";
+        assert!(is_allowed_origin(Some(&h("http://192.168.1.5:4783")), lan));
+        assert!(!is_allowed_origin(Some(&h("http://192.168.1.6:4783")), lan));
+        assert!(!is_allowed_origin(Some(&h("http://192.168.1.5:1")), lan));
+    }
+
+    #[test]
+    fn ws_origin_scheme_default_ports() {
+        let h = |o: &str| header::HeaderValue::from_str(o).unwrap();
+        // Listen on 80: origin without explicit port (default http=80) matches.
+        assert!(is_allowed_origin(Some(&h("http://localhost")), "127.0.0.1:80"));
+        // Listen on 443: https origin without explicit port matches.
+        assert!(is_allowed_origin(Some(&h("https://localhost")), "127.0.0.1:443"));
+        // But http-origin default port does NOT match a 443 listener.
+        assert!(!is_allowed_origin(Some(&h("https://localhost:80")), "127.0.0.1:443"));
     }
 }
