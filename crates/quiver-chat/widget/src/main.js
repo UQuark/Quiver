@@ -157,7 +157,9 @@ function gifElement(g, alt) {
 }
 
 // Split text on emote AND gif ranges: plain slices as text nodes, ranges as
-// imgs (emotes) / gif media. Ranges are char-based, end-exclusive.
+// imgs (emotes) / gif media. Ranges are UTF-16 code-unit offsets (Twitch's
+// wire convention), end-exclusive — JS String.slice is UTF-16, so slicing
+// here is correct by unit agreement. Do NOT "fix" this to char indices.
 function renderText(m) {
   const wrap = el("span", "text");
   const ranges = [

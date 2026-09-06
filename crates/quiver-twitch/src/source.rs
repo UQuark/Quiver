@@ -121,8 +121,11 @@ fn map_privmsg(pm: PrivmsgMessage) -> ChatMessage {
 
 /// Parse the `gifs` IRC tag: `start-end|id|url[,start-end|id|url,...]`.
 ///
-/// Indices are zero-based into the message text (inclusive end in Twitch's
-/// spec); we convert to Rust char slicing convention (exclusive end).
+/// Indices are RAW UTF-16 code-unit offsets from the wire (Twitch's
+/// convention), zero-based, inclusive end in the tag; the +1 makes end
+/// exclusive. The unit space matches the widget's JS `String.slice`, so
+/// ranges slice the correct visible text there — but they are NOT Rust
+/// char indices (never `&text[start..end]` with them).
 /// Malformed entries are skipped silently — never fatal.
 fn parse_gifs_tag(raw: Option<&str>) -> Vec<GifRef> {
     let Some(raw) = raw else { return Vec::new() };
@@ -254,6 +257,24 @@ mod tests {
         }
     }
 
+    /// Slice `text` using UTF-16 code-unit offsets — exactly what the JS
+    /// widget's `String.slice(start, end)` does. The wire (emote + gif
+    /// ranges) is in UTF-16 units, NOT Rust chars, so this is the ONLY
+    /// safe way to slice a range out of the text on the Rust side.
+    /// Never use `&text[start..end]` — it panics or mis-slices as soon as
+    /// a multibyte char precedes the range.
+    fn slice_wire_range(text: &str, start: usize, end: usize) -> String {
+        // Unit offset before each char boundary.
+        let mut units = vec![0usize];
+        for c in text.chars() {
+            units.push(units.last().unwrap() + c.len_utf16());
+        }
+        // First char boundary at/after `start`, and at/after `end`.
+        let s = units.iter().position(|&u| u >= start).unwrap_or(units.len() - 1);
+        let e = units.iter().position(|&u| u >= end).unwrap_or(units.len() - 1);
+        text.chars().skip(s).take(e.saturating_sub(s)).collect()
+    }
+
     #[test]
     fn maps_reply_parent_tags() {
         // Ground truth BY HAND: reply to abc-123 ("original text") from Y.
@@ -302,10 +323,41 @@ mod tests {
             g.url
                 .starts_with("https://media4.giphy.com/media/joSNxeswxuc74Juo8X/")
         );
-        // The gif range must slice the whole name text.
+        // The gif range must slice the whole name text (in UTF-16 units —
+        // Rust char slicing would NOT be safe once multibyte chars exist).
         assert_eq!(
-            &cm.text[g.start..g.end],
+            slice_wire_range(&cm.text, g.start, g.end),
             "[Y A Y Yes GIF by Djemilah Birnie]"
+        );
+    }
+
+    /// Regression for #42: an emoji (2 UTF-16 units) before the GIF shifts
+    /// the wire offsets away from char indices. The range must still slice
+    /// the visible GIF name when handled in UTF-16 units (as the widget
+    /// does with String.slice); a naive `&text[start..end]` would panic.
+    #[test]
+    fn gif_range_with_multibyte_prefix_slices_correct_text() {
+        // "😀[Y A Y]" — 😀 = 2 UTF-16 units, " " = 1, "[" = 3 → range 3-9
+        // inclusive on the wire, exclusive end 10 after +1.
+        let line = format!(
+            "@{base};gifs=3-9|joSNxeswxuc74Juo8X|https://media4.giphy.com/media/joSNxeswxuc74Juo8X/giphy.gif :twitchdev!twitchdev@twitchdev.tmi.twitch.tv PRIVMSG #twitch :😀 [Y A Y]",
+            base = USERNOTICE_BASE_TAGS
+        );
+        let irc = IRCMessage::parse(&line).expect("parses");
+        let pm = PrivmsgMessage::try_from(irc).expect("parses as privmsg");
+        let cm = map_privmsg(pm);
+        assert_eq!(cm.text, "😀 [Y A Y]");
+        let g = &cm.gifs[0];
+        assert_eq!((g.start, g.end), (3, 10));
+        // Two units = one char: the range must NOT include the emoji.
+        assert_eq!(slice_wire_range(&cm.text, g.start, g.end), "[Y A Y]");
+        // And a naive char-based slice (the old comments promised char
+        // indices) lands on the WRONG text — document why we keep the
+        // unit convention end-to-end.
+        assert_eq!(cm.text.chars().count(), 9, "😀 counts as ONE char");
+        assert_ne!(
+            cm.text.chars().skip(3).take(7).collect::<String>(),
+            "[Y A Y]"
         );
     }
 
@@ -365,7 +417,20 @@ mod tests {
     fn emote_range_slices_the_actual_text() {
         let cm = map_privmsg(parse_line_to_privmsg(LINE));
         let e = &cm.emotes[0];
-        assert_eq!(&cm.text[e.start..e.end], "Kappa");
+        assert_eq!(slice_wire_range(&cm.text, e.start, e.end), "Kappa");
+    }
+
+    /// Regression for #42: an emoji before the emote shifts wire offsets
+    /// away from char indices. "😀 Kappa": 😀 = 2 UTF-16 units, ' ' = 1,
+    /// Kappa at units 3..=7 inclusive → wire tag 3-7 + twitch-irc +1 = 8.
+    #[test]
+    fn emote_range_with_multibyte_prefix_slices_correct_text() {
+        let line = "@badge-info=;badges=;color=;display-name=x;emotes=25:3-7;id=abc-123;login=x;room-id=1;tmi-sent-ts=1594545155039;turbo=0;user-id=1 :x!x@x.tmi.twitch.tv PRIVMSG #chn :😀 Kappa";
+        let cm = map_privmsg(parse_line_to_privmsg(line));
+        assert_eq!(cm.text, "😀 Kappa");
+        let e = &cm.emotes[0];
+        assert_eq!((e.start, e.end), (3, 8));
+        assert_eq!(slice_wire_range(&cm.text, e.start, e.end), "Kappa");
     }
 
     #[test]
