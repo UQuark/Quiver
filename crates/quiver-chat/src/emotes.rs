@@ -57,6 +57,7 @@ struct BttvEmote {
 }
 
 #[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct BttvUser {
     #[serde(default)]
     channel_emotes: Vec<BttvEmote>,
@@ -345,6 +346,33 @@ mod tests {
             map["Sadge"],
             "https://cdn.betterttv.net/emote/def456/2x.webp"
         );
+    }
+
+    /// Regression for #33: the BTTV user endpoint returns camelCase keys
+    /// (`channelEmotes` / `sharedEmotes`) — verified live against
+    /// https://api.betterttv.net/3/cached/users/twitch/{id}. Without the
+    /// rename_all, serde silently produced empty vecs for both and only
+    /// global BTTV emotes ever worked.
+    #[test]
+    fn bttv_user_deserializes_camelcase_channel_and_shared_emotes() {
+        let sample = r#"{
+            "id": "5b1e6093da2d8b3f2c2f3e9a",
+            "bots": [],
+            "avatar": "",
+            "channelEmotes": [
+                { "id": "abc123", "code": "channelOnly" }
+            ],
+            "sharedEmotes": [
+                { "id": "def456", "code": "sharedOnly" }
+            ]
+        }"#;
+        let user: BttvUser = serde_json::from_str(sample).expect("camelCase fixture parses");
+        assert_eq!(user.channel_emotes.len(), 1);
+        assert_eq!(user.channel_emotes[0].code, "channelOnly");
+        assert_eq!(user.channel_emotes[0].id, "abc123");
+        assert_eq!(user.shared_emotes.len(), 1);
+        assert_eq!(user.shared_emotes[0].code, "sharedOnly");
+        assert_eq!(user.shared_emotes[0].id, "def456");
     }
 
     /// Ground truth BY HAND: ffz picks the "2" variant when present,
