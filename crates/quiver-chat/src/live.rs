@@ -86,16 +86,23 @@ pub fn planned_actions(old: &LiveConfig, new: &LiveConfig) -> Vec<Action> {
     if old.widget_dist != new.widget_dist {
         out.push(Action::SetWidgetDist(new.widget_dist.clone()));
     }
+    let mut broadcast_meta = old.theme != new.theme || old.emotes != new.emotes;
     if old.channel != new.channel {
         out.push(Action::SwapChannel(new.channel.clone()));
-        // The 7TV emote set is per-channel.
+        // Per-channel data sets: the 7TV/BTTV/FFZ emote map AND the badge
+        // URL map (helix resolves global badges + channel overlay). A swap
+        // must refresh both against the NEW channel, and meta carries the
+        // badge map — so force a BroadcastMeta so the widget learns the new
+        // channel's badges and re-renders existing rows.
         out.push(Action::RefreshEmotes);
-    }
-    // Emote toggles are widget-facing only (maps always serve fully).
-    let mut broadcast_meta = old.theme != new.theme || old.emotes != new.emotes;
-    if old.creds != new.creds {
         out.push(Action::RefreshBadges);
-        // Channel change above already scheduled an emote refresh.
+        broadcast_meta = true;
+    }
+    if old.creds != new.creds {
+        // Channel change above already scheduled both refreshes.
+        if !out.contains(&Action::RefreshBadges) {
+            out.push(Action::RefreshBadges);
+        }
         if !out.contains(&Action::RefreshEmotes) {
             out.push(Action::RefreshEmotes);
         }
@@ -182,7 +189,7 @@ mod tests {
     }
 
     #[test]
-    fn channel_change_swaps_only() {
+    fn channel_change_refreshes_channel_scoped_data_and_broadcasts() {
         let a = live("a:1", None, "one", Some("id"), 18, 30, 60);
         let b = live("a:1", None, "two", Some("id"), 18, 30, 60);
         assert_eq!(
@@ -190,6 +197,8 @@ mod tests {
             vec![
                 Action::SwapChannel("two".to_string()),
                 Action::RefreshEmotes,
+                Action::RefreshBadges,
+                Action::BroadcastMeta,
             ]
         );
     }

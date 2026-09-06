@@ -23,14 +23,17 @@ let customBadges = { definitions: {}, per_role: {}, per_user: {} };
 const PROVIDER_ORDER = ["ffz", "bttv", "seventv"];
 const EXPIRE_FADE_MS = 350;
 
-fetch("/emotes.json")
-  .then((r) => (r.ok ? r.json() : Promise.reject(r.status)))
-  .then((d) => {
-    thirdParty = d.providers || {};
-    const n = Object.values(thirdParty).reduce((a, m) => a + Object.keys(m).length, 0);
-    console.debug("[quiver] third-party emotes loaded:", n);
-  })
-  .catch((e) => console.debug("[quiver] no third-party emotes:", e));
+function loadEmotes() {
+  return fetch("/emotes.json")
+    .then((r) => (r.ok ? r.json() : Promise.reject(r.status)))
+    .then((d) => {
+      thirdParty = d.providers || {};
+      const n = Object.values(thirdParty).reduce((a, m) => a + Object.keys(m).length, 0);
+      console.debug("[quiver] third-party emotes loaded:", n);
+    });
+}
+
+loadEmotes().catch((e) => console.debug("[quiver] no third-party emotes:", e));
 
 function lookupThirdParty(token) {
   for (const p of PROVIDER_ORDER) {
@@ -513,6 +516,11 @@ function handle(wire) {
       // live (this was the missing half — rows only updated on F5).
       applyMeta(wire.meta);
       rerender();
+      // A channel swap pushes fresh badges inside meta, but the third-party
+      // emote map is served separately (/emotes.json) — refetch it on every
+      // config frame so a swapped channel doesn't keep rendering the old
+      // channel's emotes. Re-render again once the fresh map is in.
+      loadEmotes().then(rerender).catch((e) => console.debug("[quiver] emotes refetch failed:", e));
       break;
     case "event":
       showEvent(wire.event);
