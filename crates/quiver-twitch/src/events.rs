@@ -114,6 +114,10 @@ pub struct RaidEvent {
 /// A chat message removed by a moderator/streamer. From IRC `CLEARMSG`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct MessageDeleted {
+    /// Channel the CLEARMSG was received for — lets the engine apply its
+    /// channel straggler guard (a delete from a swapped-away channel must
+    /// not touch the new channel's state).
+    pub channel_login: String,
     pub message_id: String,
     pub sender_login: String,
 }
@@ -122,7 +126,12 @@ pub struct MessageDeleted {
 /// with no user target. `UserBanned`/`UserTimedOut` actions are not
 /// surfaced (their deletions arrive as CLEARMSG frames separately).
 #[derive(Debug, Clone, PartialEq)]
-pub struct ChatCleared;
+pub struct ChatCleared {
+    /// Channel the CLEARCHAT was received for — lets the engine apply its
+    /// channel straggler guard (a stale in-flight clear from the parted
+    /// channel would otherwise wipe the new channel's widget state).
+    pub channel_login: String,
+}
 
 /// Events surfaced by a chat source.
 #[derive(Debug, Clone, PartialEq)]
@@ -135,7 +144,7 @@ pub enum Event {
     /// A message was deleted by a moderator/streamer (IRC CLEARMSG).
     MessageDeleted(MessageDeleted),
     /// The whole chat was cleared (IRC CLEARCHAT, ChatCleared action).
-    ChatCleared,
+    ChatCleared(ChatCleared),
     /// Server PING. Answered internally by the library; informational only.
     Ping(String),
     /// Anything not yet modeled (JOIN/PART/NOTICE/USERNOTICE/...).
