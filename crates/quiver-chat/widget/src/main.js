@@ -341,7 +341,10 @@ function rerender() {
   const banners = [...chat.querySelectorAll(".event")];
   for (const c of chat.children) unwatchHeight(c);
   chat.replaceChildren(...history.map(renderMessage));
-  for (const b of banners) chat.prepend(b);
+  // Banners were collected in DOM order (newest first — showEvent prepends),
+  // so re-prepending in that order must be REVERSED, or the stacking flips
+  // (oldest on top) after every hot config reload.
+  for (const b of banners.reverse()) chat.prepend(b);
   requestAnimationFrame(settleOverflow);
 }
 
