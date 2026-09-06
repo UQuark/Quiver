@@ -411,15 +411,30 @@ pub async fn resolve_full(
 }
 
 /// Serve the cached badge file. Returns (bytes, content_type).
+///
+/// ANY on-disk `{hash}.bin` is served as long as `hash` is a validated
+/// 64-char hex string — content addressing makes files intrinsically
+/// legitimate (they were written by this tool only), and NOT gating on
+/// the live index keeps the `/badge-cache/{hash}` "immutable" contract:
+/// when a stale revalidation 200s with new content the old entry leaves
+/// the index, but pages still holding the OLD URL (rendered rows, second
+/// browser, mid-swap OBS CEF requests) must not suddenly 404.
 pub fn read_cached_file(state: &BadgeCacheState, content_hash: &str) -> Option<(Vec<u8>, String)> {
+    if content_hash.len() != 64 || !content_hash.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None; // not a content-address: refuse
+    }
     let path = content_hash_to_path(&state.cache_dir, content_hash);
-    let entry = state
+    let bytes = std::fs::read(&path).ok()?;
+    // Content type from the index when the entry still exists, otherwise
+    // sniff from the bytes (index entries are replaced on content change).
+    let content_type = state
         .index
         .0
         .values()
-        .find(|e| e.content_hash == content_hash)?;
-    let bytes = std::fs::read(&path).ok()?;
-    Some((bytes, entry.content_type.clone()))
+        .find(|e| e.content_hash == content_hash)
+        .map(|e| e.content_type.clone())
+        .unwrap_or_else(|| sniff_content_type(&bytes).to_string());
+    Some((bytes, content_type))
 }
 
 /// Compute the custom badges attached to a message + whether native badges
@@ -523,6 +538,39 @@ mod tests {
     #[test]
     fn file_not_found_returns_err() {
         assert!(resolve_file("file:///nonexistent/path.png").is_err());
+    }
+
+    /// Regression for #10: the /badge-cache/{hash} "immutable" contract.
+    /// After a content change the OLD hash leaves the index, but the old
+    /// URL must still serve from disk — browsers were told it was immutable
+    /// for a year. The read must NOT be gated on the live index.
+    #[test]
+    fn cached_file_serves_after_entry_left_the_index() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cache_dir = tmp.path().join("cache");
+        std::fs::create_dir_all(&cache_dir).unwrap();
+
+        let bytes = b"\x89PNG\x0D\x0A\x1A\x0A fake blob".to_vec();
+        let chash = sha256_hex_public(&bytes);
+        std::fs::write(cache_dir.join(format!("{chash}.bin")), &bytes).unwrap();
+
+        // Index is EMPTY — the old entry was replaced by a content change.
+        let state = BadgeCacheState {
+            resolved: ResolvedCustomBadges::default(),
+            index: Index::default(),
+            cache_dir: cache_dir.clone(),
+            file_badges: HashMap::new(),
+        };
+
+        let (served, ct) = read_cached_file(&state, &chash).expect("old URL must still serve");
+        assert_eq!(served, bytes);
+        assert_eq!(ct, "image/png", "content type sniffed from bytes");
+
+        // A non-hex / wrong-length id is refused (path assembly guard).
+        assert!(read_cached_file(&state, "../../etc/passwd").is_none());
+        assert!(read_cached_file(&state, &chash[..16]).is_none());
+        // Misses still 404.
+        assert!(read_cached_file(&state, &"0".repeat(64)).is_none());
     }
 
     /// Ground truth BY HAND: one bad + one good definition — the good one
