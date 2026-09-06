@@ -78,24 +78,18 @@ function el(tag, cls, text) {
 // Custom badges render FIRST (before Twitch CDN badges), ordered by
 // priority ascending. Set = per-role (for each Twitch badge id the
 // sender carries) ∪ per-user (by user id or login), deduplicated.
-// Hide-native decision: any matched assignment with hide_native=true.
+// Hide semantics:
+//   per-role hide_native hides ONLY that role's own native badge
+//   per-user hide_native hides ALL native badges for the user
 
 function renderCustomBadges(wrap, m) {
   const chosen = new Set();
-  let hideNative = false;
   for (const b of m.badges || []) {
     const a = customBadges.per_role?.[b.id];
-    if (a) {
-      for (const id of a.badges || []) chosen.add(id);
-      if (a.hide_native) hideNative = true;
-    }
+    if (a) for (const id of a.badges || []) chosen.add(id);
   }
   const ua = customBadges.per_user?.[m.user_id] || customBadges.per_user?.[m.user_login];
-  if (ua) {
-    for (const id of ua.badges || []) chosen.add(id);
-    if (ua.hide_native) hideNative = true;
-  }
-  m._hideNative = hideNative;
+  if (ua) for (const id of ua.badges || []) chosen.add(id);
 
   const ordered = [...chosen].sort((a, b) => {
     const pa = customBadges.definitions[a]?.priority ?? 0;
@@ -119,9 +113,16 @@ function renderCustomBadges(wrap, m) {
 function renderBadges(m) {
   const wrap = el("span", "badges");
   renderCustomBadges(wrap, m); // custom always present regardless
-  if (m._hideNative) return wrap; // any matched assignment hides natives
+
+  // per-user hide_native → suppress ALL natives for this user.
+  const ua = customBadges.per_user?.[m.user_id] || customBadges.per_user?.[m.user_login];
+  const hideAllNative = !!ua?.hide_native;
 
   for (const b of m.badges || []) {
+    if (hideAllNative) continue;
+    // per-role hide_native → suppress exactly that role's badge, keep all
+    // other native badges the user carries.
+    if (customBadges.per_role?.[b.id]?.hide_native) continue;
     const url = badgeUrls[`${b.id}/${b.version}`];
     if (!url) continue; // unknown badge — skip silently
     const img = document.createElement("img");

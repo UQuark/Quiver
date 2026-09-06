@@ -53,8 +53,14 @@ badges: Some((
 - **`hide_native: true`** suppresses that identity's Twitch CDN badges too.
 
 When several assignments match one sender (a moderator who's also in
-`per_user`), their badge lists **union** and `hide_native` is OR-ed (any
-match hides). Custom badges always render; native ones only when not hidden.
+`per_user`), their badge lists **union**. `hide_native` semantics:
+
+- **per_role** — hides ONLY that role's own badge, e.g.
+  `"moderator": ( badges: […], hide_native: true )` removes just the
+  moderator badge; subscriber/broadcaster/etc. still render.
+- **per_user** — hides ALL native badges for that user.
+
+Custom badges always render; native ones only when not hidden.
 
 Per-identity assignment detail: [Chat rendering](chat.md#layout) shows where
 badges sit in the row; class hooks are `.badges`, `.badge`, `.custom-badge`.

@@ -428,8 +428,9 @@ pub fn read_cached_file(state: &BadgeCacheState, content_hash: &str) -> Option<(
 /// Union of per-role (for each Twitch badge id the sender carries) and
 /// per-user (by Twitch user id OR login), deduplicated, sorted by
 /// `priority` ascending (ties broken by insertion order via definition
-/// map order). hide_native = OR across all matched assignments. Mirrors
-/// the widget's JS merge exactly.
+/// map order). Returned `hide` is per-USER only (hides ALL natives);
+/// per-role hide_native suppresses ONLY that role's own badge (per-badge,
+/// render-side). Mirrors the widget's JS merge.
 pub fn merge_badges<'a>(
     resolved: &'a ResolvedCustomBadges,
     message_badge_ids: &[&str],
@@ -440,7 +441,8 @@ pub fn merge_badges<'a>(
     let mut candidates: Vec<&str> = Vec::new();
     for bid in message_badge_ids {
         if let Some(assign) = resolved.per_role.get(*bid) {
-            hide |= assign.hide_native;
+            // per-role hide_native suppresses ONLY that role's badge —
+            // per-badge, render-side; it never hides all natives.
             candidates.extend(assign.badges.iter().map(String::as_str));
         }
     }
@@ -449,7 +451,7 @@ pub fn merge_badges<'a>(
         .get(user_id)
         .or_else(|| resolved.per_user.get(user_login))
     {
-        hide |= assign.hide_native;
+        hide |= assign.hide_native; // per-user hide → ALL natives
         candidates.extend(assign.badges.iter().map(String::as_str));
     }
 
@@ -637,7 +639,8 @@ mod tests {
         assert_eq!(ids, vec!["b", "c", "a"]); // p10s first (b then c in order), then p20
         assert!(!hide, "no assignment flagged hide_native");
 
-        // RR-truth: any matched assignment with hide_native=true hides.
+        // Per-user hide_native hides ALL natives; role hide does NOT leak into
+        // the per-user hide flag.
         let mut per_role_hide = HashMap::new();
         per_role_hide.insert(
             "moderator".to_string(),
@@ -646,14 +649,30 @@ mod tests {
                 hide_native: true,
             },
         );
-        let badges_hide = ResolvedCustomBadges {
+        let badges_role_hide = ResolvedCustomBadges {
             definitions: badges.definitions.clone(),
             per_role: per_role_hide,
             per_user: HashMap::new(),
         };
-        let (ids2, hide2) = merge_badges(&badges_hide, &["moderator"], "42", "mod42");
+        let (ids2, hide2) = merge_badges(&badges_role_hide, &["moderator"], "42", "mod42");
         assert_eq!(ids2.len(), 1);
-        assert!(hide2, "hide_native must OR through the merge");
+        assert!(!hide2, "per-role hide must not trigger the ALL-native flag");
+
+        let mut per_user_hide = HashMap::new();
+        per_user_hide.insert(
+            "42".to_string(),
+            ResolvedBadgeAssignment {
+                badges: vec!["c".to_string()],
+                hide_native: true,
+            },
+        );
+        let badges_user_hide = ResolvedCustomBadges {
+            definitions: badges.definitions.clone(),
+            per_role: HashMap::new(),
+            per_user: per_user_hide,
+        };
+        let (_, hide3) = merge_badges(&badges_user_hide, &["moderator"], "42", "mod42");
+        assert!(hide3, "per-user hide must set the ALL-native flag");
     }
 
     #[test]

@@ -300,14 +300,20 @@ pub struct CustomBadgeDefinition {
 }
 
 /// Per-identity badge assignment: custom badges to attach, plus whether to
-/// hide Twitch's NATIVE badges for that role/user. Multiple matching
-/// assignments union their badges; hide_native is OR-ed.
+/// hide Twitch's NATIVE badges. Semantics differ by table:
+/// - in `per_role`: hides ONLY that role's own badge
+///   (e.g. "moderator" hide_native → moderators lose the moderator badge,
+///   keep subscriber/broadcaster/etc).
+/// - in `per_user`: hides ALL native badges for that user.
+///
+/// Multiple matching assignments union their badges.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct BadgeAssignment {
     /// Custom badge ids (from `definitions`) to attach.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub badges: Vec<String>,
-    /// Suppress the sender's Twitch native CDN badges.
+    /// Conditional on the containing table (per_role = its own badge only,
+    /// per_user = all native badges).
     #[serde(default)]
     pub hide_native: bool,
 }
