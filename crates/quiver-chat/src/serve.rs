@@ -279,6 +279,13 @@ fn spawn_feed(
             };
             info!(%channel, "joining twitch chat");
 
+            // The channel this connection is actually joined to. Starts at
+            // the connect target and tracks every successful swap. Using a
+            // mutable local (rather than re-reading the outer `channel`
+            // snapshot) means a second swap parts the CURRENT channel, not
+            // the one the session originally joined.
+            let mut joined = channel;
+
             'session: loop {
                 let started_at = Instant::now();
 
@@ -311,8 +318,26 @@ fn spawn_feed(
                     }
                     FeedEvent::Swap(None) => break 'outer, // watcher gone: shutdown
                     FeedEvent::Swap(Some(new_channel)) => {
+                        // Stale-swap guard: swap requests can pile up in the
+                        // queue while the feed is down (`swap_rx` is only
+                        // polled inside 'session). live already reflects the
+                        // newest config, so a queued target that differs from
+                        // live.channel is stale — applying it would part the
+                        // just-joined channel and re-join a superseded one,
+                        // and pump would then drop every message (straggler
+                        // gate mismatch) with no recovery.
+                        let want = live.read().map(|l| l.channel.clone()).unwrap_or_default();
+                        if new_channel == joined {
+                            // Already there (duplicate or stale) — nothing to do.
+                            continue 'session;
+                        }
+                        if new_channel != want {
+                            debug!(queued = %new_channel, want = %want, "stale channel swap ignored");
+                            continue 'session;
+                        }
                         // Same connection keeps flowing; resume pumping.
-                        swap_channel(&source, &channel, &new_channel, &messages, &tx);
+                        swap_channel(&source, &joined, &new_channel, &messages, &tx);
+                        joined = new_channel;
                         continue 'session;
                     }
                 }
