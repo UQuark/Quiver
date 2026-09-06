@@ -316,6 +316,10 @@ function removeMessage(id) {
 
 let overflowMode = "prune"; // from meta.theme
 const overflowWatch = new ResizeObserver(() => settleOverflow());
+// Bounded history of rendered wire messages, so hot config reloads can
+// re-render existing rows (badge maps / heights / emote flags change
+// live — without this, only NEW rows would show them).
+let history = [];
 
 function applyOverflowMode(mode) {
   overflowMode = mode === "scroll" ? "scroll" : "prune";
@@ -330,13 +334,23 @@ function unwatchHeight(node) {
   overflowWatch.unobserve(node);
 }
 
+// Re-render all history rows (e.g. after a hot config reload changed badge
+// maps / heights / emote flags). Event banners are transient DOM-only
+// nodes and are preserved across the redraw.
+function rerender() {
+  const banners = [...chat.querySelectorAll(".event")];
+  for (const c of chat.children) unwatchHeight(c);
+  chat.replaceChildren(...history.map(renderMessage));
+  for (const b of banners) chat.prepend(b);
+  requestAnimationFrame(settleOverflow);
+}
+
 function countMsgs() {
   let n = 0;
   for (const c of chat.children) if (c.classList.contains("msg")) n++;
   return n;
 }
 
-// The one decision point: re-measure and react to height changes.
 function settleOverflow() {
   // Scroll mode: pin to bottom (only when already pinned / overflowing).
   if (overflowMode === "scroll") {
@@ -468,30 +482,41 @@ function handle(wire) {
   switch (wire.type) {
     case "snapshot":
       applyMeta(wire.meta);
+      history = wire.messages || [];
       for (const c of chat.children) unwatchHeight(c);
-      chat.replaceChildren(...(wire.messages || []).map(renderMessage));
+      chat.replaceChildren(...history.map(renderMessage));
       requestAnimationFrame(settleOverflow);
       break;
     case "message":
+      history.push(wire.message);
+      if (history.length > maxMessages) history.shift();
       chat.append(renderMessage(wire.message));
       trimTo(maxMessages);
       requestAnimationFrame(settleOverflow);
       break;
     case "expire":
+      const expired = new Set(wire.ids || []);
+      history = history.filter((m) => !expired.has(m.id));
       expire(wire.ids || []);
       break;
     case "delete":
+      history = history.filter((m) => m.id !== wire.id);
       removeMessage(wire.id);
       break;
     case "config":
-      // Hot reload: theme/badges/custom_css changed server-side.
+      // Hot reload: theme/badges/emotes/CSS changed server-side. Global
+      // state updates via applyMeta, then RE-RENDER existing rows so
+      // badge maps, custom-badge heights, and emote flags take effect
+      // live (this was the missing half — rows only updated on F5).
       applyMeta(wire.meta);
+      rerender();
       break;
     case "event":
       showEvent(wire.event);
       break;
     case "clear":
       // Channel swapped: history wiped server-side.
+      history = [];
       for (const c of chat.children) unwatchHeight(c);
       chat.replaceChildren();
       break;

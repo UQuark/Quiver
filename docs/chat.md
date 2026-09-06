@@ -37,6 +37,18 @@ Three independent layers decide how long a message lives:
 Deletion by moderators is a separate, instant path — see
 [Moderation](moderation.md).
 
+## Config re-rendering
+
+A hot reload that changes badge maps, custom-badge heights, or emote flags
+re-renders *every existing message* automatically — no snapshot refresh
+required. Internally the widget keeps a bounded history of rendered wire
+messages and replays `renderMessage()` on each. Event banners survive the
+redraw; observer handles for height measurement are cleaned up and
+re-established.
+
+This means: change `badges.vip-star.height` in your config, save, and all
+VIP badges resize immediately in your OBS source.
+
 ## Overflow: `prune` vs `scroll`
 
 The widget fills the OBS browser source's pixel box exactly. When variable-

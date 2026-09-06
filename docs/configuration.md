@@ -73,7 +73,8 @@ While running, the config file is watched. Save any change and it reloads
 **live** — no restart:
 
 - theme/CSS/emote toggles update instantly (pushed over WebSocket as a
-  `config` frame, see [Protocol](protocol.md))
+  `config` frame); existing messages re-render live so badge heights,
+  custom-badge images and role CSS all update in-place — no F5 needed
 - the channel can even **swap live** if you change `twitch.channel`
 - `server.listen` changes rebind the server (the OBS source URL must be
   updated separately, but no restart needed)

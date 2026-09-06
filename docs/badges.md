@@ -47,6 +47,10 @@ badges: Some((
   `priority` renders first (ties by definition order). `uri` is
   `http(s)://` or `file://` — see [caching](#caching) below. `height` is
   in **em units, default 1** (= native badge size, scales with the font).
+
+Badge definitions are **hot-reloaded live**: edit a height or priority,
+save the config, and the change appears in every row — no F5 required.
+See [Message Rendering](chat.md#config-re-rendering).
 - **`per_role`** — attach badge ids to users carrying a Twitch *badge set id*
   (`moderator`, `vip`, `subscriber`, … same vocabulary as `role_css`).
 - **`per_user`** — attach to a specific Twitch user, keyed by numeric ID
