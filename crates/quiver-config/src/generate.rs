@@ -222,11 +222,39 @@ fn is_nullable(schema_node: &serde_json::Value) -> bool {
 
 /// The non-null variant of a nullable schema (for Some(..) wrapping).
 /// Owned because the type-array form needs null stripped from a copy.
-fn unwrap_nullable(schema_node: &serde_json::Value) -> serde_json::Value {
+///
+/// For `Option<untagged enum>` the anyOf holds several non-null shapes,
+/// often via a `$ref` to a definitions entry whose own `anyOf` lists the
+/// variants (string + object); the FIRST non-null variant is NOT
+/// necessarily the right one — an object value must pick the OBJECT
+/// variant, not the string one. `value` drives the match via its JSON
+/// type, with `$ref`s resolved through `defs`; plain `Option<T>` (single
+/// non-null shape) is unaffected.
+fn unwrap_nullable(
+    schema_node: &serde_json::Value,
+    value: &serde_json::Value,
+    defs: Option<&serde_json::Value>,
+) -> serde_json::Value {
     if let Some(any_of) = schema_node.get("anyOf").and_then(|v| v.as_array()) {
+        let json_type = match value {
+            serde_json::Value::Object(_) => Some("object"),
+            serde_json::Value::Array(_) => Some("array"),
+            serde_json::Value::String(_) => Some("string"),
+            serde_json::Value::Number(_) => Some("number"),
+            serde_json::Value::Bool(_) => Some("boolean"),
+            serde_json::Value::Null => None,
+        };
+        if let Some(t) = json_type
+            && let Some(matched) = any_of.iter().find(|v| {
+                schema_has_json_type(resolve_ref(v, defs), t, defs)
+            })
+        {
+            return pick_type_matching_variant(&matched, t, defs);
+        }
         for variant in any_of {
-            if variant.get("type").and_then(|t| t.as_str()) != Some("null") {
-                return variant.clone();
+            let resolved = resolve_ref(variant, defs);
+            if resolved.get("type").and_then(|t| t.as_str()) != Some("null") {
+                return resolved.clone();
             }
         }
     }
@@ -245,6 +273,47 @@ fn unwrap_nullable(schema_node: &serde_json::Value) -> serde_json::Value {
     schema_node.clone()
 }
 
+/// Does this (already $ref-resolved) schema describe a value of JSON type
+/// `t`? Untagged-enum defs are themselves `anyOf` nodes, so descend
+/// recursively when the top level carries no `type`.
+fn schema_has_json_type(
+    resolved: &serde_json::Value,
+    t: &str,
+    defs: Option<&serde_json::Value>,
+) -> bool {
+    if resolved.get("type").and_then(|x| x.as_str()) == Some(t) {
+        return true;
+    }
+    if let Some(inner) = resolved.get("anyOf").and_then(|v| v.as_array()) {
+        return inner
+            .iter()
+            .any(|v| schema_has_json_type(resolve_ref(v, defs), t, defs));
+    }
+    false
+}
+
+/// Return the (resolved) type-matching variant from an anyOf — descending
+/// through nested anyOf (untagged-enum defs) to the concrete shape.
+fn pick_type_matching_variant(
+    node: &serde_json::Value,
+    t: &str,
+    defs: Option<&serde_json::Value>,
+) -> serde_json::Value {
+    let resolved = resolve_ref(node, defs);
+    if resolved.get("type").and_then(|x| x.as_str()) == Some(t) {
+        return resolved.clone();
+    }
+    if let Some(inner) = resolved.get("anyOf").and_then(|v| v.as_array()) {
+        for v in inner {
+            let candidate = pick_type_matching_variant(v, t, defs);
+            if candidate.get("type").and_then(|x| x.as_str()) == Some(t) {
+                return candidate;
+            }
+        }
+    }
+    resolved.clone()
+}
+
 fn emit_value(
     out: &mut String,
     value: &serde_json::Value,
@@ -257,7 +326,7 @@ fn emit_value(
     // RON parses (Option fields REQUIRE explicit Some(..)).
     if !value.is_null() && is_nullable(schema_node) {
         out.push_str("Some(");
-        let inner = unwrap_nullable(schema_node);
+        let inner = unwrap_nullable(schema_node, value, defs);
         emit_value(out, value, &inner, defs, indent, path)?;
         out.push(')');
         return Ok(());
