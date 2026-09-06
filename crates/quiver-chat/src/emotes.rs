@@ -236,7 +236,13 @@ pub(crate) async fn load_third_party_emotes(
         .map(|p| ((*p).to_string(), HashMap::new()))
         .collect();
 
-    let http = match reqwest::Client::builder().build() {
+    // reqwest's default has NO request timeout — a hung upstream would
+    // stall server boot (the fetch chain is awaited before bind) and
+    // freeze the reload path. 10s deadline per request.
+    let http = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+    {
         Ok(c) => c,
         Err(e) => {
             tracing::warn!(error = %e, "http client unavailable — no third-party emotes");
