@@ -98,7 +98,22 @@ pub(crate) fn spawn_watcher(config_path: PathBuf, ctx: ReloadCtx, quit: Cancella
                 None
             });
 
+        let mut watcher_alive = true;
+
         loop {
+            // `watcher_alive`: when the bridge thread exits (watcher setup
+            // failed, dir deleted, permission change) it drops event_tx,
+            // making event_rx.recv() return None instantly — without this
+            // guard the select would re-arm on None every poll and busy-
+            // spin `apply_reload` on a core forever. We latch to SIGHUP-
+            // only instead.
+            let event_fut = async {
+                if watcher_alive {
+                    event_rx.recv().await
+                } else {
+                    Some(std::future::pending::<()>().await)
+                }
+            };
             #[cfg(unix)]
             {
                 let hup_fut = async {
@@ -112,14 +127,24 @@ pub(crate) fn spawn_watcher(config_path: PathBuf, ctx: ReloadCtx, quit: Cancella
                 };
                 tokio::select! {
                     _ = quit.cancelled() => return,
-                    _ = event_rx.recv() => (),
+                    event = event_fut => {
+                        if watcher_alive && event.is_none() {
+                            warn!("config watcher exited — falling back to SIGHUP-only reloads");
+                            watcher_alive = false;
+                        }
+                    }
                     _ = hup_fut => (),
                 }
             }
             #[cfg(not(unix))]
             tokio::select! {
                 _ = quit.cancelled() => return,
-                _ = event_rx.recv() => (),
+                event = event_fut => {
+                    if watcher_alive && event.is_none() {
+                        warn!("config watcher exited — file reloads disabled");
+                        watcher_alive = false;
+                    }
+                }
             }
 
             apply_reload(&config_path, &ctx).await;
