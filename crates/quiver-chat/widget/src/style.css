@@ -128,17 +128,22 @@ body {
 
 .badges {
   display: inline-flex;
+  align-items: center;
+  /* CENTER the cluster against the line box — replaced elements have no
+     baseline, so without this the images' bottom edge drives the inline
+     box and tall badges float relative to the name's text baseline. */
+  vertical-align: middle;
   gap: 2px;
 }
 
 .badge {
   height: 1em;
-  vertical-align: middle;
 }
 
-/* Custom badges (per-role/per-user) — height set inline per definition. */
+/* Custom badges: 1em default matches native badge size (scales with the
+   font); an explicit definition height overrides via inline style. */
 .custom-badge {
-  vertical-align: middle;
+  height: 1em;
   margin-right: 2px;
 }
 

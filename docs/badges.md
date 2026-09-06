@@ -31,8 +31,8 @@ Define images, then attach them:
 ```ron
 badges: Some((
     definitions: {
-        "special": ( uri: "https://cdn.example.com/special.png", priority: 10, height: 24, label: Some("Special") ),
-        "local":   ( uri: "file:///home/user/badges/logo.png",  priority: 20, height: 24 ),
+        "special": ( uri: "https://cdn.example.com/special.png", priority: 10, height: 1, label: Some("Special") ),
+        "local":   ( uri: "file:///home/user/badges/logo.png",  priority: 20, height: 1 ),
     },
     per_role: {
         "moderator": ( badges: ["special"], hide_native: false ),
@@ -45,7 +45,8 @@ badges: Some((
 
 - **`definitions`** — `id → { uri, priority, height, label }`. Lower
   `priority` renders first (ties by definition order). `uri` is
-  `http(s)://` or `file://` — see [caching](#caching) below.
+  `http(s)://` or `file://` — see [caching](#caching) below. `height` is
+  in **em units, default 1** (= native badge size, scales with the font).
 - **`per_role`** — attach badge ids to users carrying a Twitch *badge set id*
   (`moderator`, `vip`, `subscriber`, … same vocabulary as `role_css`).
 - **`per_user`** — attach to a specific Twitch user, keyed by numeric ID

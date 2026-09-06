@@ -109,6 +109,43 @@ fn raw_string_css_roundtrips_with_quotes_and_newlines() {
     );
 }
 
+/// Ground truth BY HAND: definitions + per_role without per_user must
+/// parse (empty maps are the default — not required fields).
+#[test]
+fn badges_parse_without_per_user() {
+    let raw = r##"
+(
+    server: ( listen: "127.0.0.1:1", ),
+    twitch: ( channel: "chan", ),
+    theme: (
+        font_size_px: 18,
+        max_messages: 30,
+        message_lifetime_secs: 60,
+    ),
+    badges: Some((
+        definitions: {
+            // height omitted → defaults to 1 (em, native badge size).
+            "vip-star": ( uri: "https://cdn.example.com/vip.png", priority: 10 ),
+        },
+        per_role: {
+            "vip": ( badges: ["vip-star"], hide_native: true ),
+        },
+    )),
+)
+"##;
+    let cfg: ChatConfig = parse_str(raw).expect("config without per_user must parse");
+    let badges = cfg.badges.as_ref().expect("badges present");
+    assert!(badges.per_user.is_empty(), "per_user defaults to empty");
+    assert_eq!(badges.per_role.len(), 1);
+    assert_eq!(badges.definitions.len(), 1);
+    assert_eq!(
+        badges.definitions["vip-star"].height, 1,
+        "height must default to 1 em when omitted"
+    );
+    // And validation passes (references resolve within definitions).
+    assert_eq!(cfg.validate(), Vec::new());
+}
+
 /// Ground truth BY HAND: the struct form selects the File(uri) variant.
 #[test]
 fn uri_form_deserializes_as_file_source() {

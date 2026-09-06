@@ -104,7 +104,9 @@ function renderCustomBadges(wrap, m) {
     img.className = "custom-badge";
     img.src = d.url;
     img.alt = d.label || id;
-    if (d.height) img.style.height = `${d.height}px`;
+    // Height is in EM units (scales with the widget font like native
+    // badges). 1 = native badge size; CSS default handles absent.
+    if (d.height > 0) img.style.height = `${d.height}em`;
     if (d.label) img.title = d.label;
     wrap.append(img);
   }

@@ -284,6 +284,10 @@ fn default_refresh_interval() -> u64 {
     86400 // 24h
 }
 
+fn default_badge_height() -> u32 {
+    1 // em — native badge size, scales with font
+}
+
 /// One custom badge image: a remote URL with display metadata.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct CustomBadgeDefinition {
@@ -292,7 +296,9 @@ pub struct CustomBadgeDefinition {
     /// Lower value renders first in the badge row; ties broken by
     /// insertion order (JSON map key order).
     pub priority: u32,
-    /// Display height in CSS pixels (applied to the <img> tag).
+    /// Display height in EM units (scales with the widget font size) —
+    /// `1` renders at exactly native badge size. Absent = `1`.
+    #[serde(default = "default_badge_height")]
     pub height: u32,
     /// Optional tooltip text.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -325,10 +331,13 @@ pub struct CustomBadgesConfig {
     /// Badge image definitions: id → {uri, priority, height, label?}.
     /// HTTP(S) URIs only; fetched once at startup/reload and cached
     /// by content hash at `cache_dir`.
+    #[serde(default)]
     pub definitions: HashMap<String, CustomBadgeDefinition>,
     /// Twitch badge set id → assignment (custom badges + hide-native flag).
+    #[serde(default)]
     pub per_role: HashMap<String, BadgeAssignment>,
     /// User id or login → assignment (custom badges + hide-native flag).
+    #[serde(default)]
     pub per_user: HashMap<String, BadgeAssignment>,
     /// Cache directory override. Default: `$XDG_CACHE_HOME/Quiver/badges/`
     /// or `~/.cache/Quiver/badges/` if unset.
