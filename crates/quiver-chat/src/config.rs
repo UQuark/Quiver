@@ -427,6 +427,19 @@ impl Validate for ChatConfig {
         ] {
             if let Some(dim) = dim {
                 for item in &dim.items {
+                    // Empty pattern matches EVERY string (position-0 match) —
+                    // in denylist mode it silently blocks all chat, in
+                    // allowlist mode it makes every other pattern dead.
+                    // Almost certainly a config error: refuse it loudly.
+                    if item.is_empty() {
+                        out.push(ValidationIssue {
+                            path: format!("filters.{name}.items"),
+                            message:
+                                "empty pattern matches every message — refusing (likely a config error)"
+                                    .to_string(),
+                        });
+                        continue;
+                    }
                     if let Err(e) = regex::Regex::new(item) {
                         out.push(ValidationIssue {
                             path: format!("filters.{name}.items"),
