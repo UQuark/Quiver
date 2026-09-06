@@ -163,6 +163,10 @@ pub async fn run(cfg: ChatConfig, config_path: PathBuf) -> anyhow::Result<()> {
         rebind: rebind.clone(),
     };
     crate::reload::spawn_watcher(config_path, ctx, quit.clone());
+    // refresh_interval_secs: conditional-GET revalidation of the custom
+    // badge cache. Without this the interval was dead config — resolve_full
+    // only ran at boot and on config edits.
+    crate::reload::spawn_badge_refresh(live.clone(), custom_badges.clone(), quit.clone());
 
     loop {
         let addr = live.read().unwrap().listen.clone();
