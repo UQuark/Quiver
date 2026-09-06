@@ -115,31 +115,43 @@ pub struct TwitchConfig {
     pub client_secret: Option<String>,
 }
 
+/// Custom CSS source: inline text OR a URI to load.
+/// Untagged union: a bare string is inline CSS (historical form);
+/// a struct with `uri` loads from file:// or http(s):// using the same
+/// resolution as badges (file passthrough, http fetched) — engine-side
+/// at load/reload, so the widget always receives resolved text.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
-pub struct ThemeConfig {
-    /// Base font size for messages, in CSS pixels.
-    pub font_size_px: u32,
-    /// Maximum number of messages kept in the visible history.
-    pub max_messages: u32,
-    /// Seconds a message stays visible before fading out.
-    pub message_lifetime_secs: u64,
-    /// Your own CSS, applied after the built-in widget styles. Authored as
-    /// a RON raw string so newlines and quotes stay untouched.
-    /// Parsed with lightningcss at load/reload; a parse error is reported
-    /// as a warning but never blocks the tool.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub custom_css: Option<String>,
-    /// Per-role CSS: Twitch badge set id -> CSS snippet applied to messages
-    /// whose sender carries that badge. Message rows get `role-<id>` classes,
-    /// snippets are injected before custom_css. Common ids: broadcaster,
-    /// moderator, vip, subscriber, founder.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub role_css: Option<HashMap<String, String>>,
-    /// What happens when messages overflow the container height:
-    /// `prune` removes oldest messages until everything fits (OBS
-    /// default), `scroll` pins a scrollable chat to the bottom.
-    #[serde(default)]
-    pub overflow_mode: OverflowMode,
+#[serde(untagged)]
+pub enum CustomCssSource {
+    /// Inline CSS text: `custom_css: Some("…")`.
+    Inline(String),
+    /// Load from a URI: `custom_css: Some(( uri: "file:///…" ))`.
+    File { uri: String },
+}
+
+impl CustomCssSource {
+    pub fn uri(&self) -> Option<&str> {
+        match self {
+            Self::Inline(_) => None,
+            Self::File { uri } => Some(uri),
+        }
+    }
+
+    /// Resolve the source to CSS text. Inline returns as-is; URIs call
+    /// the badge-style resolver and propagate its errors.
+    pub(crate) async fn resolve(
+        &self,
+        http: &reqwest::Client,
+        cache_dir: &std::path::Path,
+    ) -> Result<String, String> {
+        match self {
+            Self::Inline(text) => Ok(text.clone()),
+            Self::File { uri } => {
+                let bytes = crate::serve::fetch_css_bytes(uri, http, cache_dir).await?;
+                String::from_utf8(bytes).map_err(|e| format!("{uri}: not valid UTF-8: {e}"))
+            }
+        }
+    }
 }
 
 /// Container overflow behavior. Default: prune (tight chat, no scrollbar).
@@ -152,6 +164,34 @@ pub enum OverflowMode {
     Prune,
     /// Keep messages until the count cap; scroll pinned to the bottom.
     Scroll,
+}
+
+/// Visual appearance of rendered messages.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ThemeConfig {
+    /// Base font size for messages, in CSS pixels.
+    pub font_size_px: u32,
+    /// Maximum number of messages kept in the visible history.
+    pub max_messages: u32,
+    /// Seconds a message stays visible before fading out.
+    pub message_lifetime_secs: u64,
+    /// Your own CSS, applied after the built-in widget styles. Inline
+    /// string, or load from file:// / http(s):// via `( uri: … )` —
+    /// URI sources resolve like badges (file passthrough, http fetched).
+    /// Linted with lightningcss at load/reload (advisory warn).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub custom_css: Option<CustomCssSource>,
+    /// Per-role CSS: Twitch badge set id -> CSS snippet applied to messages
+    /// whose sender carries that badge. Message rows get `role-<id>` classes,
+    /// snippets are injected before custom_css. Common ids: broadcaster,
+    /// moderator, vip, subscriber, founder.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub role_css: Option<HashMap<String, String>>,
+    /// What happens when messages overflow the container height:
+    /// `prune` removes oldest messages until everything fits (OBS
+    /// default), `scroll` pins a scrollable chat to the bottom.
+    #[serde(default)]
+    pub overflow_mode: OverflowMode,
 }
 
 /// Lint user CSS through a real parser (lightningcss).

@@ -81,11 +81,16 @@ fn sha256_hex(data: &[u8]) -> String {
     hex::encode(Sha256::digest(data))
 }
 
+/// Public alias so serve.rs can reuse the same content-hash helper.
+pub(crate) fn sha256_hex_public(data: &[u8]) -> String {
+    sha256_hex(data)
+}
+
 fn content_hash_to_path(cache_dir: &Path, content_hash: &str) -> PathBuf {
     cache_dir.join(format!("{content_hash}.bin"))
 }
 
-fn default_cache_dir() -> PathBuf {
+pub(crate) fn default_cache_dir() -> PathBuf {
     dirs_cache_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join("Quiver")

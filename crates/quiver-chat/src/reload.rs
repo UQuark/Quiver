@@ -27,6 +27,7 @@ pub(crate) struct ReloadCtx {
     pub tx: tokio::sync::broadcast::Sender<String>,
     pub badges: SharedBadges,
     pub custom_badges: crate::badges::SharedBadgeCache,
+    pub custom_css: crate::serve::SharedCss,
     pub emotes: crate::emotes::SharedEmotes,
     pub filters: crate::filters::SharedCompiled,
     pub feed_swap: mpsc::UnboundedSender<String>,
@@ -147,10 +148,9 @@ async fn apply_reload(path: &Path, ctx: &ReloadCtx) {
         return;
     }
 
-    crate::config::report_css_lint(
-        new_cfg.theme.custom_css.as_deref(),
-        new_cfg.theme.role_css.as_ref(),
-    );
+    // custom_css lint happens post-resolution (inline text or fetched
+    // content); role_css still lints from raw config.
+    crate::config::report_css_lint(None, new_cfg.theme.role_css.as_ref());
 
     // 3. Diff against what is running.
     let old_live = match ctx.live.read() {
@@ -363,6 +363,19 @@ async fn apply_action(ctx: &ReloadCtx, action: &Action, new_live: &LiveConfig) {
             }
             Err(e) => warn!(error = %e, "filter compile failed at apply — keeping old filters"),
         },
+        Action::RefreshCss => {
+            // Re-resolve the custom CSS source (inline / file / http) so a
+            // config edit that switches sources takes effect immediately.
+            let css = crate::serve::resolve_custom_css(
+                &new_live.theme.custom_css,
+                &reqwest::Client::new(),
+            )
+            .await;
+            if let Ok(mut c) = ctx.custom_css.write() {
+                *c = css;
+            }
+            info!("custom css source resolved");
+        }
         Action::BroadcastMeta => {
             // IMPORTANT: build from new_live, NOT ctx.live — during apply,
             // the shared slot still holds the OLD config (it is swapped in
@@ -374,9 +387,10 @@ async fn apply_action(ctx: &ReloadCtx, action: &Action, new_live: &LiveConfig) {
                 .read()
                 .ok()
                 .and_then(|g| g.as_ref().map(|c| c.resolved.clone()));
+            let css = ctx.custom_css.read().ok().and_then(|c| c.clone());
             let frame = serde_json::json!({
                 "type": "config",
-                "meta": crate::serve::meta_value(new_live, &badges, custom.as_ref()),
+                "meta": crate::serve::meta_value(new_live, &badges, custom.as_ref(), css.as_deref()),
             });
             let _ = ctx.tx.send(frame.to_string());
         }

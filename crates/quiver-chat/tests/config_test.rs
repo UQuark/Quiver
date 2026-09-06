@@ -100,7 +100,41 @@ fn raw_string_css_roundtrips_with_quotes_and_newlines() {
 "##;
     let cfg: ChatConfig = parse_str(raw).expect("raw string CSS must parse");
     let css = cfg.theme.custom_css.expect("css present");
-    assert_eq!(css, r#".msg { content: "x"; opacity: 0.5; }"#);
+    // Untagged union: a bare string deserializes into the Inline variant.
+    assert_eq!(
+        css,
+        quiver_chat::config::CustomCssSource::Inline(
+            r#".msg { content: "x"; opacity: 0.5; }"#.to_string()
+        )
+    );
+}
+
+/// Ground truth BY HAND: the struct form selects the File(uri) variant.
+#[test]
+fn uri_form_deserializes_as_file_source() {
+    let raw = r##"
+(
+    server: ( listen: "127.0.0.1:1", ),
+    twitch: ( channel: "chan", ),
+    theme: (
+        font_size_px: 18,
+        max_messages: 30,
+        message_lifetime_secs: 60,
+        custom_css: Some(( uri: "file:///tmp/theme.css" )),
+    ),
+)
+"##;
+    let cfg: ChatConfig = parse_str(raw).expect("uri form must parse");
+    assert_eq!(
+        cfg.theme.custom_css,
+        Some(quiver_chat::config::CustomCssSource::File {
+            uri: "file:///tmp/theme.css".to_string()
+        })
+    );
+    assert_eq!(
+        cfg.theme.custom_css.as_ref().and_then(|c| c.uri()),
+        Some("file:///tmp/theme.css")
+    );
 }
 
 #[test]

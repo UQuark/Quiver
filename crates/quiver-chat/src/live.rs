@@ -62,6 +62,8 @@ pub enum Action {
     RefreshEmotes,
     /// Custom badge definitions changed — re-resolve cache.
     ResolveBadges,
+    /// Custom CSS source changed — re-resolve (inline / file / http).
+    RefreshCss,
     /// Filtering rules changed — recompile engine matchers.
     ApplyFilters,
     /// Push fresh meta (theme/badges/custom_css) to connected clients.
@@ -102,6 +104,12 @@ pub fn planned_actions(old: &LiveConfig, new: &LiveConfig) -> Vec<Action> {
     }
     if old.filters != new.filters {
         out.push(Action::ApplyFilters);
+    }
+    // An ACTIVE custom_css (inline or URI) re-resolves on every reload —
+    // cheap for inline (clone) and file reads, and it makes source-file
+    // edits flow through on the next config save ("easy swapping").
+    if old.theme.custom_css.is_some() || new.theme.custom_css.is_some() {
+        out.push(Action::RefreshCss);
     }
     if old.badges != new.badges {
         out.push(Action::ResolveBadges);
@@ -256,8 +264,12 @@ mod tests {
         let mut a = live("a:1", None, "c", Some("id"), 18, 30, 60);
         let mut b = a.clone();
         assert_eq!(planned_actions(&a, &b), Vec::new());
-        b.theme.custom_css = Some(".msg{}".to_string());
+        b.theme.custom_css = Some(crate::config::CustomCssSource::Inline(".msg{}".to_string()));
         a.theme.custom_css = None;
-        assert_eq!(planned_actions(&a, &b), vec![Action::BroadcastMeta]);
+        // custom_css change → RefreshCss action (not just BroadcastMeta).
+        assert_eq!(
+            planned_actions(&a, &b),
+            vec![Action::RefreshCss, Action::BroadcastMeta]
+        );
     }
 }

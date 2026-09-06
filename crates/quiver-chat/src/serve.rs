@@ -39,6 +39,8 @@ pub(crate) struct AppState {
     pub tx: broadcast::Sender<String>,
     pub badges: SharedBadges,
     pub custom_badges: crate::badges::SharedBadgeCache,
+    /// Resolved custom CSS text for the widget (inline or from URI source).
+    pub custom_css: SharedCss,
     pub emotes: crate::emotes::SharedEmotes,
     /// Generation token: cancelled on rebind/shutdown so WS handlers
     /// return instead of blocking graceful drain forever.
@@ -68,7 +70,15 @@ pub async fn run(cfg: ChatConfig, config_path: PathBuf) -> anyhow::Result<()> {
         cfg.theme.max_messages as usize,
     )));
 
-    crate::config::report_css_lint(cfg.theme.custom_css.as_deref(), cfg.theme.role_css.as_ref());
+    // Lint the RESOLVED css (inline text or the file/uri content).
+    let custom_css: SharedCss = Arc::new(RwLock::new(
+        resolve_custom_css(&cfg.theme.custom_css, &reqwest::Client::new()).await,
+    ));
+    let role_css = &cfg.theme.role_css;
+    crate::config::report_css_lint(
+        custom_css.read().ok().and_then(|c| c.clone()).as_deref(),
+        role_css.as_ref(),
+    );
 
     let initial_badges = load_badge_map_opt(
         cfg.twitch.client_id.as_deref(),
@@ -147,6 +157,7 @@ pub async fn run(cfg: ChatConfig, config_path: PathBuf) -> anyhow::Result<()> {
         feed_swap: feed.swap_tx,
         fe_watch: fe_watch_tx,
         custom_badges: custom_badges.clone(),
+        custom_css: custom_css.clone(),
         emotes: emotes.clone(),
         filters: filters.clone(),
         rebind: rebind.clone(),
@@ -174,6 +185,7 @@ pub async fn run(cfg: ChatConfig, config_path: PathBuf) -> anyhow::Result<()> {
             tx: tx.clone(),
             badges: badges.clone(),
             custom_badges: custom_badges.clone(),
+            custom_css: custom_css.clone(),
             emotes: emotes.clone(),
             ws_token,
         });
@@ -390,6 +402,7 @@ pub(crate) fn meta_value(
     live: &LiveConfig,
     badges: &HashMap<String, String>,
     custom_badges: Option<&crate::badges::ResolvedCustomBadges>,
+    custom_css: Option<&str>,
 ) -> serde_json::Value {
     serde_json::json!({
         "theme": {
@@ -398,7 +411,7 @@ pub(crate) fn meta_value(
             "overflow_mode": live.theme.overflow_mode,
         },
         "badges": badges,
-        "custom_css": live.theme.custom_css,
+        "custom_css": custom_css,
         "role_css": live.theme.role_css,
         "emote_flags": {
             "twitch": live.emotes.twitch,
@@ -416,13 +429,14 @@ fn snapshot_frame(app: &AppState) -> Option<String> {
     let badges = app.badges.read().ok()?;
     let custom_badges = app.custom_badges.read().ok()?;
     let custom = custom_badges.as_ref().map(|c| &c.resolved);
+    let css = app.custom_css.read().ok().and_then(|c| c.clone());
     let st = app.messages.lock().ok()?;
     let messages: Vec<&engine::RenderedMessage> = st.messages().collect();
     Some(
         serde_json::json!({
             "type": "snapshot",
             "messages": messages,
-            "meta": meta_value(&live, &badges, custom),
+            "meta": meta_value(&live, &badges, custom, css.as_deref()),
         })
         .to_string(),
     )
@@ -625,6 +639,71 @@ fn mime_of(path: &Path) -> &'static str {
     }
 }
 
+/// Fetch CSS source bytes from a file:// or http(s):// URI — the same
+/// scheme semantics as badges. file:// is a passthrough read (canonical
+/// path); http(s) is fetched and stored by content hash in the badges
+/// cache dir (dedup, reusable across badge/css swapping).
+pub(crate) async fn fetch_css_bytes(
+    uri: &str,
+    http: &reqwest::Client,
+    cache_dir: &std::path::Path,
+) -> Result<Vec<u8>, String> {
+    if uri.starts_with("file://") {
+        let path_str = uri
+            .strip_prefix("file://")
+            .ok_or_else(|| format!("{uri}: invalid file URI"))?;
+        let canonical = std::fs::canonicalize(path_str).map_err(|e| format!("{uri}: {e}"))?;
+        return std::fs::read(&canonical).map_err(|e| format!("{uri}: {e}"));
+    }
+    if uri.starts_with("http://") || uri.starts_with("https://") {
+        let resp = http
+            .get(uri)
+            .send()
+            .await
+            .map_err(|e| format!("{uri}: {e}"))?;
+        if !resp.status().is_success() {
+            return Err(format!("{uri}: HTTP {}", resp.status()));
+        }
+        let body = resp.bytes().await.map_err(|e| format!("{uri}: {e}"))?;
+        let bytes = body.to_vec();
+        // Persist by content hash in the cache dir (badge-style storage).
+        let chash = crate::badges::sha256_hex_public(&bytes);
+        let _ = std::fs::create_dir_all(cache_dir);
+        let _ = std::fs::write(cache_dir.join(format!("css-{chash}.bin")), &bytes);
+        return Ok(bytes);
+    }
+    Err(format!(
+        "{uri}: unsupported scheme (expected file:// or http(s)://)"
+    ))
+}
+
+// ---- resolved custom CSS -------------------------------------------------
+
+/// Resolved custom CSS text shared between the meta builder and reloads.
+pub(crate) type SharedCss = Arc<RwLock<Option<String>>>;
+
+/// Resolve the configured custom CSS source to plain text (inline as-is,
+/// URI via file passthrough / http fetch). Fails softly: returns None on
+/// any error with a WARN — live rendering must never break on a bad CSS
+/// source (same philosophy as badge skip-on-error).
+pub(crate) async fn resolve_custom_css(
+    source: &Option<crate::config::CustomCssSource>,
+    http: &reqwest::Client,
+) -> Option<String> {
+    let Some(src) = source else { return None };
+    let cache_dir = crate::badges::default_cache_dir();
+    match src.resolve(http, &cache_dir).await {
+        Ok(text) => {
+            crate::config::report_css_lint(Some(&text), None);
+            Some(text)
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "custom_css source failed to resolve — ignoring");
+            None
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -642,7 +721,7 @@ mod tests {
                 font_size_px: 18,
                 max_messages: 30,
                 message_lifetime_secs: 60,
-                custom_css: custom.map(str::to_string),
+                custom_css: custom.map(|c| crate::config::CustomCssSource::Inline(c.to_string())),
                 role_css: role,
                 overflow_mode: crate::config::OverflowMode::Prune,
             },
@@ -656,7 +735,7 @@ mod tests {
         let mut roles = HashMap::new();
         roles.insert("moderator".to_string(), ".msg{}".to_string());
         let live = live_with(Some("/*c*/"), Some(roles));
-        let m = meta_value(&live, &HashMap::new(), None);
+        let m = meta_value(&live, &HashMap::new(), None, Some("/*c*/"));
 
         assert_eq!(m["custom_css"], "/*c*/");
         assert_eq!(m["role_css"]["moderator"], ".msg{}");
@@ -666,7 +745,7 @@ mod tests {
     #[test]
     fn meta_omits_unset_css_fields_as_null() {
         let live = live_with(None, None);
-        let m = meta_value(&live, &HashMap::new(), None);
+        let m = meta_value(&live, &HashMap::new(), None, None);
         assert!(m["custom_css"].is_null());
         assert!(m["role_css"].is_null());
     }
