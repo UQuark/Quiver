@@ -77,13 +77,25 @@ function el(tag, cls, text) {
 
 // Custom badges render FIRST (before Twitch CDN badges), ordered by
 // priority ascending. Set = per-role (for each Twitch badge id the
-// sender carries) ∪ per-user (by Twitch user id), deduplicated.
+// sender carries) ∪ per-user (by user id or login), deduplicated.
+// Hide-native decision: any matched assignment with hide_native=true.
+
 function renderCustomBadges(wrap, m) {
   const chosen = new Set();
+  let hideNative = false;
   for (const b of m.badges || []) {
-    for (const id of customBadges.per_role[b.id] || []) chosen.add(id);
+    const a = customBadges.per_role?.[b.id];
+    if (a) {
+      for (const id of a.badges || []) chosen.add(id);
+      if (a.hide_native) hideNative = true;
+    }
   }
-  for (const id of customBadges.per_user[m.user_id] || customBadges.per_user[m.user_login] || []) chosen.add(id);
+  const ua = customBadges.per_user?.[m.user_id] || customBadges.per_user?.[m.user_login];
+  if (ua) {
+    for (const id of ua.badges || []) chosen.add(id);
+    if (ua.hide_native) hideNative = true;
+  }
+  m._hideNative = hideNative;
 
   const ordered = [...chosen].sort((a, b) => {
     const pa = customBadges.definitions[a]?.priority ?? 0;
@@ -107,16 +119,9 @@ function renderCustomBadges(wrap, m) {
 function renderBadges(m) {
   const wrap = el("span", "badges");
   renderCustomBadges(wrap, m); // custom always present regardless
-
-  // If this user is per-user hidden, skip all native badges.
-  if (customBadges.hide_native_by_user?.[m.user_id] ||
-      customBadges.hide_native_by_user?.[m.user_login]) {
-    return wrap;
-  }
+  if (m._hideNative) return wrap; // any matched assignment hides natives
 
   for (const b of m.badges || []) {
-    // Per-role hide: if this badge id is flagged true, suppress it.
-    if (customBadges.hide_native_by_role?.[b.id]) continue;
     const url = badgeUrls[`${b.id}/${b.version}`];
     if (!url) continue; // unknown badge — skip silently
     const img = document.createElement("img");

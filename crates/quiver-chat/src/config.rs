@@ -299,6 +299,19 @@ pub struct CustomBadgeDefinition {
     pub label: Option<String>,
 }
 
+/// Per-identity badge assignment: custom badges to attach, plus whether to
+/// hide Twitch's NATIVE badges for that role/user. Multiple matching
+/// assignments union their badges; hide_native is OR-ed.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct BadgeAssignment {
+    /// Custom badge ids (from `definitions`) to attach.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub badges: Vec<String>,
+    /// Suppress the sender's Twitch native CDN badges.
+    #[serde(default)]
+    pub hide_native: bool,
+}
+
 /// Custom badge system: per-role and/or per-user badge attachments.
 /// Badge images are fetched server-side and cached by content hash.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -307,12 +320,10 @@ pub struct CustomBadgesConfig {
     /// HTTP(S) URIs only; fetched once at startup/reload and cached
     /// by content hash at `cache_dir`.
     pub definitions: HashMap<String, CustomBadgeDefinition>,
-    /// Twitch badge set id → list of custom badge ids to attach.
-    pub per_role: HashMap<String, Vec<String>>,
-    /// User → list of custom badge ids to attach. Keys are the Twitch
-    /// numeric user id (stable across renames) OR the login handle —
-    /// both are matched.
-    pub per_user: HashMap<String, Vec<String>>,
+    /// Twitch badge set id → assignment (custom badges + hide-native flag).
+    pub per_role: HashMap<String, BadgeAssignment>,
+    /// User id or login → assignment (custom badges + hide-native flag).
+    pub per_user: HashMap<String, BadgeAssignment>,
     /// Cache directory override. Default: `$XDG_CACHE_HOME/Quiver/badges/`
     /// or `~/.cache/Quiver/badges/` if unset.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -321,15 +332,6 @@ pub struct CustomBadgesConfig {
     /// Default 86400 (24 hours).
     #[serde(default = "default_refresh_interval")]
     pub refresh_interval_secs: u64,
-    /// Hide Twitch native CDN badges (subscriber/broadcaster/…) for users
-    /// with a matching badge set id. `true` = hide those badges; absent or
-    /// `false` = show them. Empty map = show all.
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub hide_native_by_role: HashMap<String, bool>,
-    /// Hide Twitch native badges for a specific Twitch user id or login
-    /// handle. Same semantics as hide_native_by_role.
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub hide_native_by_user: HashMap<String, bool>,
 }
 
 impl Default for CustomBadgesConfig {
@@ -340,8 +342,6 @@ impl Default for CustomBadgesConfig {
             per_user: HashMap::new(),
             cache_dir: None,
             refresh_interval_secs: 86400,
-            hide_native_by_role: HashMap::new(),
-            hide_native_by_user: HashMap::new(),
         }
     }
 }
@@ -466,21 +466,21 @@ impl Validate for ChatConfig {
                     });
                 }
             }
-            for (role, ids) in &badges.per_role {
-                for id in ids {
+            for (role, assignment) in &badges.per_role {
+                for id in &assignment.badges {
                     if !badges.definitions.contains_key(id.as_str()) {
                         out.push(ValidationIssue {
-                            path: format!("badges.per_role.{role}"),
+                            path: format!("badges.per_role.{role}.badges"),
                             message: format!("references undefined badge {id:?}"),
                         });
                     }
                 }
             }
-            for (uid, ids) in &badges.per_user {
-                for id in ids {
+            for (uid, assignment) in &badges.per_user {
+                for id in &assignment.badges {
                     if !badges.definitions.contains_key(id.as_str()) {
                         out.push(ValidationIssue {
-                            path: format!("badges.per_user.{uid}"),
+                            path: format!("badges.per_user.{uid}.badges"),
                             message: format!("references undefined badge {id:?}"),
                         });
                     }

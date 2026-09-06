@@ -30,16 +30,29 @@ pub struct ResolvedBadge {
     pub label: Option<String>,
 }
 
+/// Resolved per-identity badge assignment (mirror of config,
+/// serde-clean for the wire).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ResolvedBadgeAssignment {
+    pub badges: Vec<String>,
+    pub hide_native: bool,
+}
+
+impl From<&crate::config::BadgeAssignment> for ResolvedBadgeAssignment {
+    fn from(a: &crate::config::BadgeAssignment) -> Self {
+        Self {
+            badges: a.badges.clone(),
+            hide_native: a.hide_native,
+        }
+    }
+}
+
 /// Fully resolved custom badge state: definitions + per-role + per-user maps.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ResolvedCustomBadges {
     pub definitions: HashMap<String, ResolvedBadge>,
-    pub per_role: HashMap<String, Vec<String>>,
-    pub per_user: HashMap<String, Vec<String>>,
-    /// Hide Twitch native badges for users with a matching badge set id.
-    pub hide_native_by_role: HashMap<String, bool>,
-    /// Hide Twitch native badges for a specific user id or login.
-    pub hide_native_by_user: HashMap<String, bool>,
+    pub per_role: HashMap<String, ResolvedBadgeAssignment>,
+    pub per_user: HashMap<String, ResolvedBadgeAssignment>,
 }
 
 // ---- cache internals ----------------------------------------------------
@@ -380,10 +393,16 @@ pub async fn resolve_full(
     Ok(BadgeCacheState {
         resolved: ResolvedCustomBadges {
             definitions,
-            per_role: cfg.per_role.clone(),
-            per_user: cfg.per_user.clone(),
-            hide_native_by_role: cfg.hide_native_by_role.clone(),
-            hide_native_by_user: cfg.hide_native_by_user.clone(),
+            per_role: cfg
+                .per_role
+                .iter()
+                .map(|(k, v)| (k.clone(), ResolvedBadgeAssignment::from(v)))
+                .collect(),
+            per_user: cfg
+                .per_user
+                .iter()
+                .map(|(k, v)| (k.clone(), ResolvedBadgeAssignment::from(v)))
+                .collect(),
         },
         index,
         cache_dir,
@@ -403,28 +422,35 @@ pub fn read_cached_file(state: &BadgeCacheState, content_hash: &str) -> Option<(
     Some((bytes, entry.content_type.clone()))
 }
 
-/// Compute the custom badges attached to a message, in render order.
+/// Compute the custom badges attached to a message + whether native badges
+/// are hidden, in render order.
 ///
 /// Union of per-role (for each Twitch badge id the sender carries) and
 /// per-user (by Twitch user id OR login), deduplicated, sorted by
 /// `priority` ascending (ties broken by insertion order via definition
-/// map order). Mirrors the widget's JS merge exactly.
+/// map order). hide_native = OR across all matched assignments. Mirrors
+/// the widget's JS merge exactly.
 pub fn merge_badges<'a>(
     resolved: &'a ResolvedCustomBadges,
     message_badge_ids: &[&str],
     user_id: &str,
     user_login: &str,
-) -> Vec<&'a ResolvedBadge> {
+) -> (Vec<&'a ResolvedBadge>, bool) {
+    let mut hide = false;
     let mut candidates: Vec<&str> = Vec::new();
     for bid in message_badge_ids {
-        if let Some(ids) = resolved.per_role.get(*bid) {
-            candidates.extend(ids.iter().map(String::as_str));
+        if let Some(assign) = resolved.per_role.get(*bid) {
+            hide |= assign.hide_native;
+            candidates.extend(assign.badges.iter().map(String::as_str));
         }
     }
-    if let Some(ids) = resolved.per_user.get(user_id) {
-        candidates.extend(ids.iter().map(String::as_str));
-    } else if let Some(ids) = resolved.per_user.get(user_login) {
-        candidates.extend(ids.iter().map(String::as_str));
+    if let Some(assign) = resolved
+        .per_user
+        .get(user_id)
+        .or_else(|| resolved.per_user.get(user_login))
+    {
+        hide |= assign.hide_native;
+        candidates.extend(assign.badges.iter().map(String::as_str));
     }
 
     // Dedup preserving first-seen order.
@@ -437,7 +463,7 @@ pub fn merge_badges<'a>(
         .filter_map(|id| resolved.definitions.get(*id))
         .collect();
     result.sort_by_key(|b| b.priority);
-    result
+    (result, hide)
 }
 
 // ---- tests --------------------------------------------------------------
@@ -533,8 +559,6 @@ mod tests {
             per_user: HashMap::new(),
             cache_dir: Some(tmp.path().join("cache")),
             refresh_interval_secs: 60,
-            hide_native_by_role: HashMap::new(),
-            hide_native_by_user: HashMap::new(),
         };
 
         let http = reqwest::Client::new();
@@ -587,30 +611,57 @@ mod tests {
         let mut per_role = HashMap::new();
         per_role.insert(
             "moderator".to_string(),
-            vec!["a".to_string(), "b".to_string()],
+            ResolvedBadgeAssignment {
+                badges: vec!["a".to_string(), "b".to_string()],
+                hide_native: false,
+            },
         );
         let mut per_user = HashMap::new();
-        per_user.insert("42".to_string(), vec!["c".to_string()]);
+        per_user.insert(
+            "42".to_string(),
+            ResolvedBadgeAssignment {
+                badges: vec!["c".to_string()],
+                hide_native: false,
+            },
+        );
 
         let badges = ResolvedCustomBadges {
             definitions: defs,
             per_role,
             per_user,
-            hide_native_by_role: HashMap::new(),
-            hide_native_by_user: HashMap::new(),
         };
 
         // Mod with user_id=42: badges from both role("a"p20 + "b"p10) and user("c"p10).
-        let user_badges = merge_badges(&badges, &["moderator"], "42", "mod42");
+        let (user_badges, hide) = merge_badges(&badges, &["moderator"], "42", "mod42");
         let ids: Vec<&str> = user_badges.iter().map(|b| b.id.as_str()).collect();
         assert_eq!(ids, vec!["b", "c", "a"]); // p10s first (b then c in order), then p20
+        assert!(!hide, "no assignment flagged hide_native");
+
+        // RR-truth: any matched assignment with hide_native=true hides.
+        let mut per_role_hide = HashMap::new();
+        per_role_hide.insert(
+            "moderator".to_string(),
+            ResolvedBadgeAssignment {
+                badges: vec!["a".to_string()],
+                hide_native: true,
+            },
+        );
+        let badges_hide = ResolvedCustomBadges {
+            definitions: badges.definitions.clone(),
+            per_role: per_role_hide,
+            per_user: HashMap::new(),
+        };
+        let (ids2, hide2) = merge_badges(&badges_hide, &["moderator"], "42", "mod42");
+        assert_eq!(ids2.len(), 1);
+        assert!(hide2, "hide_native must OR through the merge");
     }
 
     #[test]
     fn unknown_role_user_keys_are_ignored() {
         let badges = ResolvedCustomBadges::default();
-        let merged = merge_badges(&badges, &["unknown_role"], "999", "unknown");
+        let (merged, hide) = merge_badges(&badges, &["unknown_role"], "999", "unknown");
         assert!(merged.is_empty());
+        assert!(!hide);
     }
 
     #[test]
@@ -630,10 +681,9 @@ mod tests {
             definitions: defs,
             per_role: HashMap::new(),
             per_user: HashMap::new(),
-            hide_native_by_role: HashMap::new(),
-            hide_native_by_user: HashMap::new(),
         };
-        let merged = merge_badges(&badges, &[], "0", "user0");
+        let (merged, hide) = merge_badges(&badges, &[], "0", "user0");
         assert!(merged.is_empty());
+        assert!(!hide);
     }
 }
