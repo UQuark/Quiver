@@ -143,16 +143,26 @@ async fn fetch_bttv(
 ) -> anyhow::Result<HashMap<String, String>> {
     let mut out = HashMap::new();
 
+    // Global part: a failure here DOES fail the provider (nothing to keep).
     let global: Vec<BttvEmote> = reqwest_get(http, format!("{BTTV_API}/emotes/global")).await?;
     for e in global {
         out.insert(e.code, format!("{BTTV_URL}/{}/2x.webp", e.id));
     }
 
-    if let Some(bid) = broadcaster_id {
-        let user: BttvUser = reqwest_get(http, format!("{BTTV_API}/users/twitch/{bid}")).await?;
-        for e in user.channel_emotes.into_iter().chain(user.shared_emotes) {
-            out.insert(e.code, format!("{BTTV_URL}/{}/2x.webp", e.id));
+    // Channel/shared part is INDEPENDENT: a failure (rate limit, DNS,
+    // timeout) must NOT throw away the globals already fetched — the
+    // module contract says failures degrade "that part only". Log and
+    // keep going.
+    let Some(bid) = broadcaster_id else {
+        return Ok(out);
+    };
+    match reqwest_get::<BttvUser>(http, format!("{BTTV_API}/users/twitch/{bid}")).await {
+        Ok(user) => {
+            for e in user.channel_emotes.into_iter().chain(user.shared_emotes) {
+                out.insert(e.code, format!("{BTTV_URL}/{}/2x.webp", e.id));
+            }
         }
+        Err(e) => tracing::warn!(error = %e, "bttv channel emotes unavailable — keeping globals"),
     }
     Ok(out)
 }
@@ -190,7 +200,8 @@ async fn fetch_ffz(
 ) -> anyhow::Result<HashMap<String, String>> {
     let mut out = HashMap::new();
 
-    // Global sets are listed under default_sets.
+    // Global sets are listed under default_sets. A failure here fails the
+    // provider (nothing to keep).
     let global: serde_json::Value = reqwest_get(http, format!("{FFZ_API}/set/global")).await?;
     let default_sets: Vec<String> = global
         .get("default_sets")
@@ -198,16 +209,24 @@ async fn fetch_ffz(
         .unwrap_or_default();
     out.extend(flatten_ffz_sets(global, &default_sets));
 
-    if let Some(bid) = broadcaster_id {
-        let room: serde_json::Value = reqwest_get(http, format!("{FFZ_API}/room/id/{bid}")).await?;
-        let active_set = room
-            .pointer("/room/set")
-            .and_then(|v| v.as_i64())
-            .map(|n| n.to_string());
-        out.extend(flatten_ffz_sets(
-            room,
-            &active_set.iter().cloned().collect::<Vec<_>>(),
-        ));
+    // Room part is INDEPENDENT: FFZ's room endpoint was observed slow/
+    // timing out in probing — a failure must keep the global sets (the
+    // module contract: failures degrade "that part only").
+    let Some(bid) = broadcaster_id else {
+        return Ok(out);
+    };
+    match reqwest_get::<serde_json::Value>(http, format!("{FFZ_API}/room/id/{bid}")).await {
+        Ok(room) => {
+            let active_set = room
+                .pointer("/room/set")
+                .and_then(|v| v.as_i64())
+                .map(|n| n.to_string());
+            out.extend(flatten_ffz_sets(
+                room,
+                &active_set.iter().cloned().collect::<Vec<_>>(),
+            ));
+        }
+        Err(e) => tracing::warn!(error = %e, "ffz room emotes unavailable — keeping globals"),
     }
     Ok(out)
 }
@@ -286,11 +305,21 @@ pub(crate) async fn load_third_party_emotes(
     }
 
     fill!("seventv", async {
-        let mut m = fetch_seventv_global(&http).await.unwrap_or_default();
-        if let Some(bid) = &broadcaster_id
-            && let Ok(c) = fetch_seventv_channel(&http, bid).await
-        {
-            m.extend(c);
+        // Global and channel parts isolated with EXPLICIT logging: a
+        // fully-down 7TV must not look like "no 7TV emotes" with zero
+        // diagnostics.
+        let mut m = match fetch_seventv_global(&http).await {
+            Ok(m) => m,
+            Err(e) => {
+                tracing::warn!(error = %e, "7tv global emotes unavailable");
+                HashMap::new()
+            }
+        };
+        if let Some(bid) = &broadcaster_id {
+            match fetch_seventv_channel(&http, bid).await {
+                Ok(c) => m.extend(c),
+                Err(e) => tracing::warn!(error = %e, "7tv channel emotes unavailable — keeping globals"),
+            }
         }
         Ok::<_, anyhow::Error>(m)
     });
