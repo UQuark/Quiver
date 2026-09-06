@@ -128,12 +128,48 @@ impl Default for UntaggedOptionalFixture {
 #[test]
 fn untagged_option_struct_variant_emits_ron_struct_parens() {
     let out = generate_default::<UntaggedOptionalFixture>("test-tool").expect("generation succeeds");
-    // An object value under an object-variant schema → RON struct parens.
     assert!(out.contains("css: Some((\n        uri: \"file:///x\",\n    )),"), "wrong shape:\n{out}");
     let parsed: UntaggedOptionalFixture = parse_str(&out).expect("generated must parse");
     assert_eq!(
         parsed.css,
         some_file_default(),
         "generated text must round-trip to the Some(File) default"
+    );
+}
+
+/// Regression for #64: a NON-optional untagged enum with a struct-variant
+/// default. The field schema is a (possibly $ref'd) anyOf; emit_value must
+/// descend to the object variant and emit RON struct PARENS — not free-form
+/// map braces. (Non-Option fields don't go through unwrap_nullable.)
+#[derive(Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+struct UntaggedRequiredFixture {
+    /// Required untagged source with a struct-variant default.
+    css: CssSource,
+}
+
+impl Default for UntaggedRequiredFixture {
+    fn default() -> Self {
+        Self {
+            css: CssSource::File {
+                uri: "file:///x".to_string(),
+            },
+        }
+    }
+}
+
+#[test]
+fn untagged_required_struct_variant_emits_ron_struct_parens() {
+    let out = generate_default::<UntaggedRequiredFixture>("test-tool").expect("generation succeeds");
+    assert!(
+        out.contains("css: (\n        uri: \"file:///x\",\n    ),"),
+        "wrong shape:\n{out}"
+    );
+    let parsed: UntaggedRequiredFixture = parse_str(&out).expect("generated must parse");
+    assert_eq!(
+        parsed.css,
+        CssSource::File {
+            uri: "file:///x".to_string()
+        },
+        "generated text must round-trip to the File default"
     );
 }
