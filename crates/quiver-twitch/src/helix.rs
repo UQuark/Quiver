@@ -24,6 +24,10 @@ pub enum HelixError {
 
     #[error("helix resource not found: {0}")]
     NotFound(String),
+
+    /// A channel-scoped (user token) call was made without usable OAuth.
+    #[error("channel oauth required: {0}")]
+    ChannelAuthRequired(String),
 }
 
 #[derive(Debug, Clone)]
@@ -32,12 +36,14 @@ struct CachedToken {
     expires_at: Instant,
 }
 
-/// Helix client authenticated via app access token (client-credentials).
+/// Helix client authenticated via app access token (client-credentials),
+/// optionally paired with a channel-scoped user token (see [`crate::auth`]).
 pub struct HelixClient {
     http: reqwest::Client,
     client_id: String,
     client_secret: String,
     token: RwLock<Option<CachedToken>>,
+    channel: RwLock<Option<crate::auth::ChannelToken>>,
 }
 
 impl HelixClient {
@@ -45,12 +51,59 @@ impl HelixClient {
         client_id: impl Into<String>,
         client_secret: impl Into<String>,
     ) -> reqwest::Result<Self> {
+        // 10s deadline per request (see #36): a hung Helix must degrade, not stall.
+        let http = reqwest::Client::builder()
+            .timeout(Duration::from_secs(10))
+            .build()?;
         Ok(Self {
-            http: reqwest::Client::new(),
+            http,
             client_id: client_id.into(),
             client_secret: client_secret.into(),
             token: RwLock::new(None),
+            channel: RwLock::new(None),
         })
+    }
+
+    /// Attach channel-scoped OAuth from the on-disk store, when present.
+    /// Callers check [`Self::has_channel_auth`] to learn whether it landed.
+    pub fn with_channel_auth(self) -> Self {
+        let token = crate::auth::ChannelToken::load(
+            self.http.clone(),
+            &self.client_id,
+            &self.client_secret,
+        );
+        if let Some(token) = token {
+            *self.channel.write().unwrap() = Some(token);
+        }
+        self
+    }
+
+    /// Install tokens obtained right now (e.g. straight after `--auth`).
+    pub fn set_channel_tokens(&self, store: crate::auth::StoredTokens) {
+        let token = crate::auth::ChannelToken::from_store(
+            self.http.clone(),
+            &self.client_id,
+            &self.client_secret,
+            store,
+        );
+        *self.channel.write().unwrap() = Some(token);
+    }
+
+    pub fn has_channel_auth(&self) -> bool {
+        self.channel
+            .read()
+            .unwrap()
+            .as_ref()
+            .map(|t| t.is_present())
+            .unwrap_or(false)
+    }
+
+    pub fn channel_login(&self) -> Option<String> {
+        self.channel
+            .read()
+            .unwrap()
+            .as_ref()
+            .and_then(|t| t.channel_login())
     }
 
     /// Valid app access token; fetches a fresh one when missing/expiring.
@@ -128,6 +181,66 @@ impl HelixClient {
         unreachable!("retry loop returns or errors on both passes")
     }
 
+    /// GET a Helix path with CHANNEL (user) auth. Retries once on 401 after
+    /// forcing a cross-tick refresh (the token refresh runs on demand).
+    async fn get_json_user<T: DeserializeOwned>(
+        &self,
+        path: &str,
+        query: &[(&str, &str)],
+    ) -> Result<T, HelixError> {
+        let token = self
+            .channel
+            .read()
+            .unwrap()
+            .as_ref()
+            .ok_or_else(|| {
+                HelixError::ChannelAuthRequired(
+                    "run `quiver-chat --auth` to enable channel-scoped calls".to_string(),
+                )
+            })?
+            .access_token()
+            .await?;
+        let resp = self
+            .http
+            .get(format!("{HELIX_URL}{path}"))
+            .query(query)
+            .header("Client-Id", &self.client_id)
+            .bearer_auth(token)
+            .send()
+            .await?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(HelixError::Api {
+                status: status.as_u16(),
+                body,
+            });
+        }
+        Ok(resp.json::<T>().await?)
+    }
+
+    /// Identity for the currently-authed user (used right after `--auth`).
+    /// Requires a user token; returns (id, login).
+    pub async fn me(&self) -> Result<(String, String), HelixError> {
+        #[derive(serde::Deserialize)]
+        struct MeResponse {
+            data: Vec<Me>,
+        }
+        #[derive(serde::Deserialize)]
+        struct Me {
+            id: String,
+            login: String,
+        }
+        let parsed: MeResponse = self.get_json_user("/users", &[]).await?;
+        parsed
+            .data
+            .into_iter()
+            .next()
+            .map(|u| (u.id, u.login))
+            .ok_or_else(|| HelixError::NotFound("current user".to_string()))
+    }
+
     /// Numeric broadcaster ID for a channel login.
     pub async fn user_id(&self, login: &str) -> Result<String, HelixError> {
         #[derive(serde::Deserialize)]
@@ -165,6 +278,94 @@ impl HelixClient {
         }
         Ok(map)
     }
+
+    /// reward_id -> reward title for the channel. Requires channel OAuth
+    /// (scope `channel:read:redemptions`).
+    pub async fn custom_reward_titles(
+        &self,
+        broadcaster_id: &str,
+    ) -> Result<HashMap<String, String>, HelixError> {
+        #[derive(serde::Deserialize)]
+        struct RewardsResponse {
+            data: Vec<Reward>,
+        }
+        #[derive(serde::Deserialize)]
+        struct Reward {
+            id: String,
+            title: String,
+        }
+
+        let parsed: RewardsResponse = self
+            .get_json_user(
+                "/channel_points/custom_rewards",
+                &[("broadcaster_id", broadcaster_id)],
+            )
+            .await?;
+        Ok(parsed
+            .data
+            .into_iter()
+            .map(|r| (r.id, r.title))
+            .collect())
+    }
+
+    /// Open (UNFULFILLED) channel point redemptions. Requires channel OAuth
+    /// (scope `channel:read:redemptions`).
+    pub async fn open_redemptions(
+        &self,
+        broadcaster_id: &str,
+    ) -> Result<Vec<Redemption>, HelixError> {
+        #[derive(serde::Deserialize)]
+    struct RedemptionsResponse {
+        data: Vec<RawRedemption>,
+    }
+
+        let parsed: RedemptionsResponse = self
+            .get_json_user(
+                "/channel_points/custom_rewards/redemptions",
+                &[("broadcaster_id", broadcaster_id), ("status", "UNFULFILLED")],
+            )
+            .await?;
+        Ok(parsed.data.into_iter().map(Into::into).collect())
+    }
+}
+
+/// A channel point redemption (from the GET redemptions endpoint).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Redemption {
+    pub id: String,
+    pub user_id: String,
+    pub user_login: String,
+    pub user_display_name: String,
+    pub reward_id: String,
+    pub user_input: String,
+    pub created_at: String,
+}
+
+impl From<RawRedemption> for Redemption {
+    fn from(r: RawRedemption) -> Self {
+        Self {
+            id: r.id,
+            user_id: r.user_id,
+            user_login: r.user_login,
+            user_display_name: r.user_name,
+            reward_id: r.reward_id,
+            user_input: r.user_input,
+            created_at: r.created_at,
+        }
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct RawRedemption {
+    id: String,
+    user_id: String,
+    user_login: String,
+    user_name: String,
+    #[serde(rename = "channel_points_custom_reward_id")]
+    reward_id: String,
+    #[serde(default)]
+    user_input: String,
+    created_at: String,
 }
 
 #[derive(serde::Deserialize)]

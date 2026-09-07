@@ -6,11 +6,13 @@
 //! [`events::Event`] and friends, so the backend can be swapped without
 //! touching them.
 
+pub mod auth;
 pub mod error;
 pub mod events;
 pub mod helix;
 pub mod source;
 
+pub use auth::{ChannelToken, DEFAULT_SCOPES, StoredTokens};
 pub use error::TwitchError;
 pub use events::{
     Badge, ChatMessage, EmoteRef, Event, GifRef, GiftSubEvent, MessageDeleted, MysteryGiftEvent,
