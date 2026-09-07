@@ -46,7 +46,12 @@ impl HelixClient {
         client_secret: impl Into<String>,
     ) -> reqwest::Result<Self> {
         Ok(Self {
-            http: reqwest::Client::new(),
+            // reqwest's default client has NO request timeout — a hung
+            // upstream would stall whatever this Helix call is part of
+            // (boot badge map, emote channel-id lookup) indefinitely.
+            http: reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(10))
+                .build()?,
             client_id: client_id.into(),
             client_secret: client_secret.into(),
             token: RwLock::new(None),
