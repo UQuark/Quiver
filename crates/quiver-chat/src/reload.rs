@@ -386,7 +386,7 @@ async fn apply_action(ctx: &ReloadCtx, action: &Action, new_live: &LiveConfig) {
             // config edit that switches sources takes effect immediately.
             let css = crate::serve::resolve_custom_css(
                 &new_live.theme.custom_css,
-                &reqwest::Client::new(),
+                &crate::serve::http_client(),
             )
             .await;
             if let Ok(mut c) = ctx.custom_css.write() {
@@ -413,7 +413,7 @@ async fn apply_action(ctx: &ReloadCtx, action: &Action, new_live: &LiveConfig) {
         }
         Action::ResolveBadges => match &new_live.badges {
             Some(badge_cfg) => {
-                let http = reqwest::Client::new();
+                let http = crate::serve::http_client();
                 match crate::badges::resolve_full(badge_cfg, &http).await {
                     Ok(state) => {
                         if let Ok(mut g) = ctx.custom_badges.write() {

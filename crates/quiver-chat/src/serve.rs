@@ -29,6 +29,21 @@ const INITIAL_BACKOFF: Duration = Duration::from_secs(2);
 const MAX_BACKOFF: Duration = Duration::from_secs(60);
 /// A feed that lived this long counts as healthy; reset backoff after it.
 const HEALTHY_FEED_RUNTIME: Duration = Duration::from_secs(300);
+/// Deadline for every upstream badge/CSS fetch — reqwest's default has NO
+/// timeout, and a hung URL would stall server boot (both fetches are
+/// awaited before bind) or freeze a hot reload forever.
+const UPSTREAM_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// HTTP client for badge/CSS upstream fetches, with a request deadline.
+pub(crate) fn http_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .timeout(UPSTREAM_TIMEOUT)
+        .build()
+        .unwrap_or_else(|e| {
+            warn!(error = %e, "http client build failed — falling back to default");
+            reqwest::Client::new()
+        })
+}
 
 pub(crate) type SharedBadges = Arc<RwLock<HashMap<String, String>>>;
 
@@ -72,7 +87,7 @@ pub async fn run(cfg: ChatConfig, config_path: PathBuf) -> anyhow::Result<()> {
 
     // Lint the RESOLVED css (inline text or the file/uri content).
     let custom_css: SharedCss = Arc::new(RwLock::new(
-        resolve_custom_css(&cfg.theme.custom_css, &reqwest::Client::new()).await,
+        resolve_custom_css(&cfg.theme.custom_css, &http_client()).await,
     ));
     let role_css = &cfg.theme.role_css;
     crate::config::report_css_lint(
@@ -101,7 +116,7 @@ pub async fn run(cfg: ChatConfig, config_path: PathBuf) -> anyhow::Result<()> {
 
     let custom_badges = match &cfg.badges {
         Some(badge_cfg) => {
-            let http = reqwest::Client::new();
+            let http = http_client();
             match crate::badges::resolve_full(badge_cfg, &http).await {
                 Ok(state) => {
                     info!(
