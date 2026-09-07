@@ -222,8 +222,10 @@ fn map_event(sub_type: &str, ev: &serde_json::Value) -> Option<serde_json::Value
             "kind": kind,
             "user_login": ev["user_login"].as_str().unwrap_or_default(),
             "display_name": ev["user_name"].as_str().unwrap_or_default(),
-            // EventSub carries the reward title inline — no Helix lookup needed.
+            // EventSub carries the reward title AND icon inline — no Helix
+            // lookup needed.
             "reward_title": ev["reward"]["title"].as_str(),
+            "reward_image": ev["reward"]["image"]["url_2x"].as_str(),
             "user_input": ev["user_input"].as_str().unwrap_or_default(),
         }
     }))

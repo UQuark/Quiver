@@ -325,12 +325,12 @@ impl HelixClient {
         Ok(map)
     }
 
-    /// reward_id -> reward title for the channel. Requires channel OAuth
-    /// (scope `channel:read:redemptions`).
+    /// reward_id -> reward display info (title + icon URL) for the channel.
+    /// Requires channel OAuth (scope `channel:read:redemptions`).
     pub async fn custom_reward_titles(
         &self,
         broadcaster_id: &str,
-    ) -> Result<HashMap<String, String>, HelixError> {
+    ) -> Result<HashMap<String, RewardInfo>, HelixError> {
         #[derive(serde::Deserialize)]
         struct RewardsResponse {
             data: Vec<Reward>,
@@ -339,6 +339,13 @@ impl HelixClient {
         struct Reward {
             id: String,
             title: String,
+            #[serde(default)]
+            image: Option<RewardImage>,
+        }
+        #[derive(serde::Deserialize)]
+        struct RewardImage {
+            #[serde(rename = "url_2x")]
+            url_2x: Option<String>,
         }
 
         let parsed: RewardsResponse = self
@@ -350,7 +357,17 @@ impl HelixClient {
         Ok(parsed
             .data
             .into_iter()
-            .map(|r| (r.id, r.title))
+            .map(|r| {
+                (
+                    r.id,
+                    RewardInfo {
+                        title: r.title,
+                        // 2x preferred; Twitch returns null image for
+                        // rewards using the default icon.
+                        image_url: r.image.and_then(|i| i.url_2x),
+                    },
+                )
+            })
             .collect())
     }
 
@@ -373,6 +390,14 @@ impl HelixClient {
             .await?;
         Ok(parsed.data.into_iter().map(Into::into).collect())
     }
+}
+
+/// Display info for a channel point reward: its title and icon URL
+/// (None when the reward uses Twitch's default icon).
+#[derive(Debug, Clone, PartialEq)]
+pub struct RewardInfo {
+    pub title: String,
+    pub image_url: Option<String>,
 }
 
 /// A channel point redemption (from the GET redemptions endpoint).

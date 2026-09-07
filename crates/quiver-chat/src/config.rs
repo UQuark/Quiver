@@ -192,6 +192,15 @@ pub struct ThemeConfig {
     /// default), `scroll` pins a scrollable chat to the bottom.
     #[serde(default)]
     pub overflow_mode: OverflowMode,
+    /// Seconds an event banner (redeem, hype train, prediction, poll, …)
+    /// stays in the chat flow before fading out. `0` keeps banners until
+    /// they are scrolled away by later messages (no auto-dismiss).
+    #[serde(default = "default_event_banner_secs")]
+    pub event_banner_secs: u64,
+}
+
+fn default_event_banner_secs() -> u64 {
+    8
 }
 
 /// Lint user CSS through a real parser (lightningcss).
@@ -235,6 +244,7 @@ impl Default for ThemeConfig {
             custom_css: None,
             role_css: None,
             overflow_mode: OverflowMode::Prune,
+            event_banner_secs: default_event_banner_secs(),
         }
     }
 }
@@ -409,10 +419,16 @@ impl Validate for ChatConfig {
             "must be within 1..=1000",
             &mut out,
         );
-        require(
+                require(
             self.theme.message_lifetime_secs >= 1,
             "theme.message_lifetime_secs",
             "must be at least 1",
+            &mut out,
+        );
+        require(
+            self.theme.event_banner_secs <= 3600,
+            "theme.event_banner_secs",
+            "must be at most 3600 (0 = banners stay until scrolled away)",
             &mut out,
         );
 

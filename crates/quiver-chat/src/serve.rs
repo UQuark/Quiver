@@ -181,7 +181,7 @@ let css_cache_dir = cfg
                                     if let Ok(mut t) = reward_titles.write() {
                                         *t = map;
                                     }
-                                    debug!("reward title cache refreshed");
+                                    debug!("reward info cache refreshed");
                                 }
                                 Err(e) => warn!(error = %e, "reward title refresh failed"),
                             },
@@ -255,10 +255,13 @@ let css_cache_dir = cfg
                             if !fresh {
                                 continue;
                             }
-                            let title = reward_titles
+                            let info = reward_titles
                                 .read()
                                 .ok()
                                 .and_then(|m| m.get(&r.reward_id).cloned());
+                            let (title, image) = info
+                                .map(|i| (Some(i.title), i.image_url))
+                                .unwrap_or((None, None));
                             if !crate::filters::CompiledFilters::permits_event(
                                 &filters_for_poll,
                                 crate::filters::MsgKind::Redeem,
@@ -276,6 +279,7 @@ let css_cache_dir = cfg
                                     "user_login": r.user_login,
                                     "display_name": r.user_display_name,
                                     "reward_title": title,
+                                    "reward_image": image,
                                     "user_input": r.user_input,
                                 }
                             });
@@ -708,6 +712,7 @@ pub(crate) fn meta_value(
             "font_size_px": live.theme.font_size_px,
             "max_messages": live.theme.max_messages,
             "overflow_mode": live.theme.overflow_mode,
+            "event_banner_secs": live.theme.event_banner_secs,
         },
         "badges": badges,
         "custom_css": custom_css,
@@ -1221,6 +1226,7 @@ mod tests {
                 custom_css: custom.map(|c| crate::config::CustomCssSource::Inline(c.to_string())),
                 role_css: role,
                 overflow_mode: crate::config::OverflowMode::Prune,
+                event_banner_secs: 8,
             },
             emotes: EmotesConfig::default(),
         }

@@ -57,7 +57,11 @@ global rules still win.
 | `.user`, `.sep`, `.text`, `.body` | name / colon / wrapped text / inline body |
 | `.reply`, `.reply-arrow`, `.reply-user`, `.reply-text` | reply thread header |
 | `.gif` | GIPHY GIF rendering |
-| `.event`, `.event-icon` | transient event banners |
+| `.event` | one event banner row (in the chat flow; also `.event.expiring`) |
+| `.event-<kind>` | kind hook: `.event-redeem`, `.event-hype_train`, `.event-prediction`, `.event-poll`, `.event-sub`, … |
+| `.event-icon` | the icon span (emoji/text icons) |
+| `.event-icon-img` | the icon when it is a real image (e.g. the Twitch reward coin icon) |
+| `.event-text` | banner text |
 
 ### Container-level hooks
 

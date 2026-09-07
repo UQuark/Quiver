@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 use crate::filters::MsgKind;
 use quiver_twitch::{
     Badge, ChatMessage, EmoteRef, Event, GifRef, GiftSubEvent, MessageDeleted, MysteryGiftEvent,
-    RaidEvent, RedeemEvent, SubEvent,
+    RaidEvent, RedeemEvent, RewardInfo, SubEvent,
 };
 use serde::Serialize;
 use tracing::warn;
@@ -58,6 +58,9 @@ pub enum WireEvent {
         /// Resolved reward title when channel OAuth exists; None → the
         /// widget renders a generic label.
         reward_title: Option<String>,
+        /// Reward icon URL (Twitch coin icon) when resolvable; the widget
+        /// falls back to a text icon.
+        reward_image: Option<String>,
         user_input: String,
     },
 }
@@ -117,9 +120,10 @@ impl From<RedeemEvent> for WireEvent {
         Self::Redeem {
             user_login: r.user_login,
             display_name: r.display_name,
-            // Title resolution happens at emit time (Helix cache); the
+            // Title/image resolution happens at emit time (Helix cache); the
             // untyped fallback renders as "a channel point reward".
             reward_title: None,
+            reward_image: None,
             user_input: r.user_input,
         }
     }
@@ -339,9 +343,10 @@ impl EngineState {
 /// Shared handle used by the server and the pump task.
 pub type SharedState = Arc<Mutex<EngineState>>;
 
-/// reward_id -> reward title, resolved via Helix when channel OAuth exists.
-/// Refreshed periodically by the serve layer; the pump only reads it.
-pub type SharedRewardTitles = Arc<RwLock<HashMap<String, String>>>;
+/// reward_id -> reward display info (title + icon URL), resolved via Helix
+/// when channel OAuth exists. Refreshed periodically by the serve layer; the
+/// pump only reads it.
+pub type SharedRewardTitles = Arc<RwLock<HashMap<String, RewardInfo>>>;
 
 /// Shared ring buffer that suppresses duplicate redemption emissions across
 /// producers (IRC, poller, EventSub) within a 30s window, keyed by
@@ -514,13 +519,16 @@ pub async fn pump(
                         if !fresh {
                             continue;
                         }
-                        let reward_title = reward_titles
+                        let (reward_title, reward_image) = reward_titles
                             .read()
                             .ok()
-                            .and_then(|m| m.get(&r.reward_id).cloned());
+                            .and_then(|m| m.get(&r.reward_id).cloned())
+                            .map(|info| (Some(info.title), info.image_url))
+                            .unwrap_or((None, None));
                         let mut wire = WireEvent::from(r);
-                        if let WireEvent::Redeem { reward_title: rt, .. } = &mut wire {
+                        if let WireEvent::Redeem { reward_title: rt, reward_image: ri, .. } = &mut wire {
                             *rt = reward_title;
+                            *ri = reward_image;
                         }
                         send_event(&tx, wire);
                     }

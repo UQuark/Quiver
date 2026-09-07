@@ -19,5 +19,5 @@ pub use events::{
     Badge, ChatMessage, EmoteRef, Event, GifRef, GiftSubEvent, MessageDeleted, MysteryGiftEvent,
     RaidEvent, RedeemEvent, ReplyParent, SubEvent,
 };
-pub use helix::{HelixClient, HelixError};
+pub use helix::{HelixClient, HelixError, Redemption, RewardInfo};
 pub use source::IrcChatSource;
