@@ -500,6 +500,11 @@ function handle(wire) {
       requestAnimationFrame(settleOverflow);
       break;
     case "message":
+      // Dedupe by id: on WS join/resync there is a small race window (a
+      // broadcast between the handler's drain and its snapshot read) where
+      // a message is BOTH in the snapshot and delivered live. Skip if we
+      // already have this exact message.
+      if (history.some((m) => m.id === wire.message.id)) break;
       history.push(wire.message);
       if (history.length > maxMessages) history.shift();
       chat.append(renderMessage(wire.message));

@@ -587,6 +587,31 @@ async fn ws_handler(
 }
 
 async fn handle_socket(mut socket: WebSocket, state: AppState) {
+    // Subscribe FIRST, drain buffered frames, THEN snapshot.
+    //
+    // engine::pump broadcasts the message frame under the same lock it
+    // mutates history under, so:
+    //   - every frame buffered at drain time predates the snapshot's state
+    //     read — its mutation is already in the snapshot, safe to discard;
+    //   - every mutation AFTER the snapshot read is not in the snapshot and
+    //     is delivered live via rx — no loss.
+    // The only residual race (a mutation between the drain and the snapshot
+    // read) shows up as a DUPLICATE, which the widget's message handler
+    // dedupes by message id.
+    //
+    // The old order (snapshot → send().await → subscribe) lost real
+    // messages on every (re)connect: the send await is a real window under
+    // TCP backpressure and broadcasts in it reached neither the snapshot
+    // nor the not-yet-created receiver.
+    let mut rx = state.tx.subscribe();
+    loop {
+        match rx.try_recv() {
+            Ok(_) => continue, // buffered pre-snapshot frame: already in snapshot
+            Err(broadcast::error::TryRecvError::Empty)
+            | Err(broadcast::error::TryRecvError::Lagged(_)) => break,
+            Err(broadcast::error::TryRecvError::Closed) => return, // senders dropped
+        }
+    }
     let Some(snapshot) = snapshot_frame(&state) else {
         return;
     };
@@ -594,7 +619,6 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
         return;
     }
 
-    let mut rx = state.tx.subscribe();
     loop {
         tokio::select! {
             res = rx.recv() => match res {

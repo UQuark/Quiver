@@ -382,9 +382,22 @@ pub async fn pump(
                         continue; // filtered: never reaches history or clients
                     }
                     let rendered = RenderedMessage::from(cm);
-                    let evicted = state.lock().map(|mut st| st.push(rendered.clone())).unwrap_or_default();
-                    let frame = serde_json::json!({ "type": "message", "message": rendered });
-                    let _ = tx.send(frame.to_string());
+                    // Push to history AND build the wire frame under ONE
+                    // lock section — snapshots (serve::snapshot_frame) hold
+                    // the same lock, so "frame buffered in the broadcast
+                    // channel" ⟺ "mutation already visible to a concurrent
+                    // snapshot read". WS join/resync handlers rely on this
+                    // invariant to drain buffered frames safely: a frame
+                    // discarded at drain time is guaranteed in the snapshot.
+                    let (evicted, frame) = state
+                        .lock()
+                        .map(|mut st| {
+                            let evicted = st.push(rendered.clone());
+                            let frame = serde_json::json!({ "type": "message", "message": rendered });
+                            (evicted, frame.to_string())
+                        })
+                        .unwrap_or_default();
+                    let _ = tx.send(frame);
                     if !evicted.is_empty() {
                         let frame = serde_json::json!({ "type": "expire", "ids": evicted });
                         let _ = tx.send(frame.to_string());
