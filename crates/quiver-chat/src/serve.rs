@@ -732,30 +732,56 @@ async fn static_fallback(State(state): State<AppState>, req: Request) -> Respons
             // Cache-busting: bake the widget dir's newest mtime into the
             // asset URLs in index.html. A cache that ignores no-cache
             // still cannot serve a stale file across a DIFFERENT URL.
-            let body = if full.ends_with("index.html") && dist.is_dir() {
-                String::from_utf8_lossy(&bytes).replace(
-                    "__QUIVER_VERSION__",
-                    &quiver_widget_version(&dist).to_string(),
+            //
+            // Only index.html goes through the text/replace path — every
+            // other file must be served as raw bytes, or binary assets
+            // (images/fonts in the widget dir) get silently mangled by
+            // from_utf8_lossy.
+            if full.ends_with("index.html") && dist.is_dir() {
+                (
+                    [
+                        (header::CONTENT_TYPE, mime_of(&full)),
+                        // Reloads must always pull fresh bytes from disk — without
+                        // this, Chromium heuristically caches main.js and a stale
+                        // copy keeps rendering no matter how many reloads fire.
+                        (header::CACHE_CONTROL, "no-cache"),
+                        // Legacy CEF builds may not trust no-cache alone.
+                        (header::PRAGMA, "no-cache"),
+                        (header::EXPIRES, "0"),
+                    ],
+                    static_body(bytes, &full, &dist),
                 )
+                    .into_response()
             } else {
-                String::from_utf8_lossy(&bytes).into_owned()
-            };
-            (
-                [
-                    (header::CONTENT_TYPE, mime_of(&full)),
-                    // Reloads must always pull fresh bytes from disk — without
-                    // this, Chromium heuristically caches main.js and a stale
-                    // copy keeps rendering no matter how many reloads fire.
-                    (header::CACHE_CONTROL, "no-cache"),
-                    // Legacy CEF builds may not trust no-cache alone.
-                    (header::PRAGMA, "no-cache"),
-                    (header::EXPIRES, "0"),
-                ],
-                body,
-            )
-                .into_response()
+                (
+                    [
+                        (header::CONTENT_TYPE, mime_of(&full)),
+                        (header::CACHE_CONTROL, "no-cache"),
+                        (header::PRAGMA, "no-cache"),
+                        (header::EXPIRES, "0"),
+                    ],
+                    bytes,
+                )
+                    .into_response()
+            }
         }
         Err(_) => (StatusCode::NOT_FOUND, "not found").into_response(),
+    }
+}
+
+/// Response body for a static widget file.
+///
+/// Only `index.html` is treated as text (cache-busting version token
+/// substitution); every other file — including binary assets like images
+/// or fonts in the widget dir — must be served byte-identical. Running
+/// those through `String::from_utf8_lossy` would silently corrupt them.
+fn static_body(bytes: Vec<u8>, full: &Path, dist: &Path) -> Vec<u8> {
+    if full.ends_with("index.html") && dist.is_dir() {
+        let text = String::from_utf8_lossy(&bytes).into_owned();
+        text.replace("__QUIVER_VERSION__", &quiver_widget_version(dist).to_string())
+            .into_bytes()
+    } else {
+        bytes
     }
 }
 
@@ -793,9 +819,14 @@ fn mime_of(path: &Path) -> &'static str {
         Some("png") => "image/png",
         Some("jpg") | Some("jpeg") => "image/jpeg",
         Some("gif") => "image/gif",
+        Some("webp") => "image/webp",
+        Some("avif") => "image/avif",
         Some("svg") => "image/svg+xml",
         Some("ico") => "image/x-icon",
         Some("woff2") => "font/woff2",
+        Some("woff") => "font/woff",
+        Some("ttf") => "font/ttf",
+        Some("map") => "application/json",
         Some("txt") => "text/plain; charset=utf-8",
         _ => "application/octet-stream",
     }
@@ -1006,5 +1037,43 @@ mod tests {
         assert!(is_allowed_origin(Some(&h("https://localhost")), "127.0.0.1:443"));
         // But http-origin default port does NOT match a 443 listener.
         assert!(!is_allowed_origin(Some(&h("https://localhost:80")), "127.0.0.1:443"));
+    }
+
+    #[test]
+    fn static_body_passes_binary_assets_through_byte_identical() {
+        // Invalid UTF-8 (a PNG-ish payload) must come back EXACTLY as served —
+        // from_utf8_lossy would have replaced each bad byte with U+FFFD.
+        let png = [0x89u8, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x01, 0x02, 0xFF];
+        let dist = std::path::Path::new("dist");
+        let out = static_body(png.to_vec(), Path::new("dist/logo.png"), dist);
+        assert_eq!(out, png, "binary asset was corrupted by the static fallback");
+    }
+
+    fn temp_widget_dir(html: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "quiver-test-widget-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("index.html"), html).unwrap();
+        dir
+    }
+
+    #[test]
+    fn static_body_substitutes_version_token_only_in_index_html() {
+        let dist = temp_widget_dir("");
+        let html = b"<html><script src=\"app.js?v=__QUIVER_VERSION__\"></script></html>".to_vec();
+        let out = static_body(html.clone(), &dist.join("index.html"), &dist);
+        let text = String::from_utf8(out).unwrap();
+        assert!(!text.contains("__QUIVER_VERSION__"), "token was not substituted");
+        // Non-index files never see the token substitution.
+        let js = b"const v = \"__QUIVER_VERSION__\";".to_vec();
+        let out = static_body(js.clone(), &dist.join("app.js"), &dist);
+        assert_eq!(out, js, "non-index file must NOT be rewritten");
+        let _ = std::fs::remove_dir_all(&dist);
     }
 }
