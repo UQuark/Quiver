@@ -7,12 +7,15 @@ pub struct Badge {
 
 /// An emote reference inside a message.
 ///
-/// `start`/`end` are CHARACTER indices into the message text with
-/// INCLUSIVE start and EXCLUSIVE end (Rust `&text[start..end]` slices it).
+/// `start`/`end` are RAW UTF-16 code-unit offsets into the message text —
+/// the exact numbers from the Twitch wire (no char normalization),
+/// inclusive start, EXCLUSIVE end (twitch-irc adds +1 to the wire's
+/// inclusive end).
 ///
-/// GOTCHA: Twitch's wire format uses UTF-16 code units with inclusive end.
-/// `twitch-irc` normalizes to char indices + exclusive end for us. Do not
-/// "simplify" this back to wire format without a very good reason.
+/// GOTCHA: these are NOT Rust char indices — `&text[start..end]` panics or
+/// slices the wrong text whenever a multibyte character precedes the emote.
+/// They ARE valid offsets for JS `String.slice` (also UTF-16 units), which
+/// is what the widget uses. Keep widget-side slicing in UTF-16 units.
 #[derive(Debug, Clone, PartialEq)]
 pub struct EmoteRef {
     pub id: String,
@@ -22,7 +25,9 @@ pub struct EmoteRef {
 
 /// A GIPHY GIF sent via Twitch's Tier2/3 GIF Keyboard.
 ///
-/// Positioned like an emote: char indices, inclusive start / exclusive end.
+/// Positioned like an emote: RAW UTF-16 code-unit offsets from the wire,
+/// inclusive start / exclusive end (+1 from the wire's inclusive end).
+/// Same gotcha as [`EmoteRef`] — never char-slice these in Rust.
 /// The URL is the signed GIPHY media URL from the wire tag — render as-is.
 #[derive(Debug, Clone, PartialEq)]
 pub struct GifRef {

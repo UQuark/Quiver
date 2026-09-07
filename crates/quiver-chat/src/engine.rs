@@ -120,8 +120,10 @@ impl From<&Badge> for WireBadge {
     }
 }
 
-/// Emote position on the wire. `start`/`end` are char indices into
-/// `text`, end EXCLUSIVE (normalized by quiver-twitch).
+/// Emote position on the wire. `start`/`end` are RAW UTF-16 code-unit
+/// offsets into `text` (Twitch's wire convention, no char normalization;
+/// end EXCLUSIVE). The widget slices with JS `String.slice` — same unit
+/// space — which is why placement works. NOT Rust char indices.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct WireEmote {
     pub id: String,
@@ -139,9 +141,10 @@ impl From<&EmoteRef> for WireEmote {
     }
 }
 
-/// GIF position on the wire (Twitch GIF Keyboard). `start`/`end` are char
-/// indices into `text`, end EXCLUSIVE. URL is the signed GIPHY media URL —
-/// render as-is.
+/// GIF position on the wire (Twitch GIF Keyboard). `start`/`end` are RAW
+/// UTF-16 code-unit offsets into `text` (wire convention), end EXCLUSIVE —
+/// same gotcha as WireEmote: NOT Rust char indices. URL is the signed
+/// GIPHY media URL — render as-is.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct WireGif {
     pub id: String,
