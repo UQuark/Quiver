@@ -99,6 +99,40 @@ fn main() -> anyhow::Result<()> {
         .block_on(quiver_chat::serve::run(cfg, args.config))
 }
 
+/// Open the verification URL in the user's default browser, OS-agnostic.
+/// Best-effort: the URL stays printed for manual fallback on headless boxes.
+fn open_browser(url: &str) {
+    #[cfg(target_os = "macos")]
+    {
+        // `open <url>` — macOS default-handler launch.
+        match std::process::Command::new("open").arg(url).spawn() {
+            Ok(_) => return,
+            Err(e) => eprintln!("note: could not open browser automatically ({e})"),
+        }
+    }
+    #[cfg(target_os = "windows")]
+    {
+        // `start` treats the first quoted argument as the window title, so
+        // an empty title precedes the URL.
+        match std::process::Command::new("cmd")
+            .args(["/C", "start", "", url])
+            .spawn()
+        {
+            Ok(_) => return,
+            Err(e) => eprintln!("note: could not open browser automatically ({e})"),
+        }
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        // xdg-open covers desktop Linux/BSD; headless boxes will fail here
+        // and the printed URL is the fallback.
+        match std::process::Command::new("xdg-open").arg(url).spawn() {
+            Ok(_) => return,
+            Err(e) => eprintln!("note: could not open browser automatically ({e})"),
+        }
+    }
+}
+
 /// Twitch Device Code Flow: prints a code, waits for approval, persists the
 /// token pair to the XDG OAuth store, resolves the authed channel, and
 /// prints a short summary. Scope list overridable via `--scopes a,b,c`.
@@ -141,6 +175,7 @@ async fn run_auth_flow(cfg: &ChatConfig, scopes_override: Option<&str>) {
 
     println!("1. Open:  {}", challenge.verification_uri);
     println!("2. Enter: {}", challenge.user_code);
+    open_browser(&challenge.verification_uri);
     println!(
         "Waiting for approval (auto-polling every {}s, code valid {}s)...",
         challenge.interval, challenge.expires_in

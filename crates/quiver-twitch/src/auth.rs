@@ -28,7 +28,7 @@ pub const DEFAULT_SCOPES: &[&str] = &[
     "channel:read:predictions",
     "channel:read:polls",
     "channel:read:subscriptions",
-    "channel:read:follows",
+    "moderator:read:followers",
     "channel:read:goals",
     "channel:read:charity",
     "channel:read:ads",
@@ -101,15 +101,30 @@ impl<'a> DeviceFlow<'a> {
             interval: u64,
         }
 
-        let mut req = self
-            .http
-            .post(DEVICE_URL)
-            .form(&[("client_id", self.client_id), ("scopes", &scopes.join(" "))]);
+        // Twitch docs are inconsistent on the scopes parameter name (table:
+        // `scopes`, example: `scope`) — send both; unknown params are ignored.
+        let joined = scopes.join(" ");
+        let mut form: Vec<(&str, &str)> = vec![
+            ("client_id", self.client_id),
+            ("scopes", &joined),
+            ("scope", &joined),
+        ];
         if let Some(secret) = self.client_secret {
-            req = req.form(&[("client_secret", secret)]);
+            form.push(("client_secret", secret));
         }
 
-        let resp: DeviceResponse = req.send().await?.error_for_status()?.json().await?;
+        let resp = self.http.post(DEVICE_URL).form(&form).send().await?;
+        let status = resp.status();
+        if !status.is_success() {
+            // Surface Twitch's actual reason (invalid_client, invalid scope,
+            // device flow not enabled for this app, ...) — a bare 400 hides it.
+            let body = resp.text().await.unwrap_or_default();
+            return Err(HelixError::Api {
+                status: status.as_u16(),
+                body,
+            });
+        }
+        let resp: DeviceResponse = resp.json().await?;
         Ok(DeviceChallenge {
             device_code: resp.device_code,
             user_code: resp.user_code,
@@ -126,7 +141,9 @@ impl<'a> DeviceFlow<'a> {
             access_token: String,
             refresh_token: String,
             expires_in: u64,
-            scope: Option<String>,
+            /// Twitch returns scope as a JSON ARRAY of strings.
+            #[serde(default)]
+            scope: Vec<String>,
         }
 
         #[derive(serde::Deserialize)]
@@ -134,31 +151,29 @@ impl<'a> DeviceFlow<'a> {
             message: Option<String>,
         }
 
-        let mut req = self.http.post(TOKEN_URL).form(&[
+        // NOTE: one .form() call — a second call would REPLACE the body,
+        // silently dropping client_id/device_code (the "missing client id"
+        // 400). Secret rides in the same form.
+        let mut form: Vec<(&str, &str)> = vec![
             ("client_id", self.client_id),
             ("device_code", device_code),
             ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
-        ]);
+        ];
         if let Some(secret) = self.client_secret {
-            req = req.form(&[("client_secret", secret)]);
+            form.push(("client_secret", secret));
         }
 
-        let resp = req.send().await?;
+        let resp = self.http.post(TOKEN_URL).form(&form).send().await?;
         let status = resp.status();
         if status.is_success() {
             let t: TokenResponse = resp.json().await?;
-            let scopes = t
-                .scope
-                .as_deref()
-                .map(|s| s.split_whitespace().map(str::to_string).collect())
-                .unwrap_or_default();
             return Ok(TokenPoll::Granted(StoredTokens {
                 client_id: self.client_id.to_string(),
                 channel_login: None,
                 access_token: t.access_token,
                 refresh_token: t.refresh_token,
                 expires_at: now_epoch() + t.expires_in,
-                scopes,
+                scopes: t.scope,
             }));
         }
 
