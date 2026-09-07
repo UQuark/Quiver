@@ -384,9 +384,17 @@ async fn apply_action(ctx: &ReloadCtx, action: &Action, new_live: &LiveConfig) {
         Action::RefreshCss => {
             // Re-resolve the custom CSS source (inline / file / http) so a
             // config edit that switches sources takes effect immediately.
+            // Thread the configured badge cache_dir so an http css source
+            // keeps sharing it (incl. the user's override).
+            let cache_dir = new_live
+                .badges
+                .as_ref()
+                .and_then(|b| b.cache_dir.clone())
+                .unwrap_or_else(crate::badges::default_cache_dir);
             let css = crate::serve::resolve_custom_css(
                 &new_live.theme.custom_css,
                 &crate::serve::http_client(),
+                &cache_dir,
             )
             .await;
             if let Ok(mut c) = ctx.custom_css.write() {

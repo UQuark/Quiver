@@ -86,8 +86,13 @@ pub async fn run(cfg: ChatConfig, config_path: PathBuf) -> anyhow::Result<()> {
     )));
 
     // Lint the RESOLVED css (inline text or the file/uri content).
+let css_cache_dir = cfg
+        .badges
+        .as_ref()
+        .and_then(|b| b.cache_dir.clone())
+        .unwrap_or_else(crate::badges::default_cache_dir);
     let custom_css: SharedCss = Arc::new(RwLock::new(
-        resolve_custom_css(&cfg.theme.custom_css, &http_client()).await,
+        resolve_custom_css(&cfg.theme.custom_css, &http_client(), &css_cache_dir).await,
     ));
     let role_css = &cfg.theme.role_css;
     crate::config::report_css_lint(
@@ -772,10 +777,21 @@ fn mime_of(path: &Path) -> &'static str {
     }
 }
 
+/// Revalidation tokens for one http(s) custom_css source, stored as a
+/// sidecar `css-{url-hash}.json` next to the body cache file.
+#[derive(serde::Deserialize, serde::Serialize, Default)]
+struct CssMeta {
+    etag: Option<String>,
+    last_modified: Option<String>,
+}
+
 /// Fetch CSS source bytes from a file:// or http(s):// URI — the same
 /// scheme semantics as badges. file:// is a passthrough read (canonical
-/// path); http(s) is fetched and stored by content hash in the badges
-/// cache dir (dedup, reusable across badge/css swapping).
+/// path); http(s) uses a conditional GET against a per-URL cache
+/// (body `css-{url-hash}.bin` + meta sidecar), so a 304 or an unchanged
+/// file is served from cache instead of an unconditional refetch, and the
+/// stored file is actually READ BACK (previously it was written and never
+/// consulted).
 pub(crate) async fn fetch_css_bytes(
     uri: &str,
     http: &reqwest::Client,
@@ -789,20 +805,55 @@ pub(crate) async fn fetch_css_bytes(
         return std::fs::read(&canonical).map_err(|e| format!("{uri}: {e}"));
     }
     if uri.starts_with("http://") || uri.starts_with("https://") {
-        let resp = http
-            .get(uri)
-            .send()
-            .await
-            .map_err(|e| format!("{uri}: {e}"))?;
+        let uhash = crate::badges::sha256_hex_public(uri.as_bytes());
+        let body_path = cache_dir.join(format!("css-{uhash}.bin"));
+        let meta_path = cache_dir.join(format!("css-{uhash}.json"));
+
+        let meta: Option<CssMeta> = std::fs::read_to_string(&meta_path)
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok());
+        let body_exists = body_path.is_file();
+
+        let mut req = http.get(uri);
+        if let Some(m) = &meta {
+            if let Some(etag) = &m.etag {
+                req = req.header("If-None-Match", etag);
+            }
+            if let Some(lm) = &m.last_modified {
+                req = req.header("If-Modified-Since", lm);
+            }
+        }
+        let resp = req.send().await.map_err(|e| format!("{uri}: {e}"))?;
+        if resp.status() == reqwest::StatusCode::NOT_MODIFIED && body_exists {
+            // Conditional GET says our copy is current — serve it back.
+            return std::fs::read(&body_path).map_err(|e| format!("{uri}: cache read failed: {e}"));
+        }
         if !resp.status().is_success() {
             return Err(format!("{uri}: HTTP {}", resp.status()));
         }
-        let body = resp.bytes().await.map_err(|e| format!("{uri}: {e}"))?;
-        let bytes = body.to_vec();
-        // Persist by content hash in the cache dir (badge-style storage).
-        let chash = crate::badges::sha256_hex_public(&bytes);
+        let (etag, lm) = {
+            let e = resp
+                .headers()
+                .get("etag")
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_string);
+            let l = resp
+                .headers()
+                .get("last-modified")
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_string);
+            (e, l)
+        };
+        let bytes = resp.bytes().await.map_err(|e| format!("{uri}: {e}"))?.to_vec();
+        // Persist body + revalidation tokens (badge-style storage).
         let _ = std::fs::create_dir_all(cache_dir);
-        let _ = std::fs::write(cache_dir.join(format!("css-{chash}.bin")), &bytes);
+        let _ = std::fs::write(&body_path, &bytes);
+        let new_meta = CssMeta { etag, last_modified: lm };
+        if new_meta.etag.is_some() || new_meta.last_modified.is_some() {
+            if let Ok(json) = serde_json::to_string(&new_meta) {
+                let _ = std::fs::write(&meta_path, json);
+            }
+        }
         return Ok(bytes);
     }
     Err(format!(
@@ -819,13 +870,17 @@ pub(crate) type SharedCss = Arc<RwLock<Option<String>>>;
 /// URI via file passthrough / http fetch). Fails softly: returns None on
 /// any error with a WARN — live rendering must never break on a bad CSS
 /// source (same philosophy as badge skip-on-error).
+///
+/// `cache_dir`: the badge cache directory from `badges.cache_dir` (or its
+/// default). Passing it in keeps CSS http caching colocated with/redirected
+/// alongside the badge cache, honoring the user's override.
 pub(crate) async fn resolve_custom_css(
     source: &Option<crate::config::CustomCssSource>,
     http: &reqwest::Client,
+    cache_dir: &std::path::Path,
 ) -> Option<String> {
     let Some(src) = source else { return None };
-    let cache_dir = crate::badges::default_cache_dir();
-    match src.resolve(http, &cache_dir).await {
+    match src.resolve(http, cache_dir).await {
         Ok(text) => {
             crate::config::report_css_lint(Some(&text), None);
             Some(text)
