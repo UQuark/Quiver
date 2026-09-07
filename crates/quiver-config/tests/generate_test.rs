@@ -92,3 +92,48 @@ fn generated_output_round_trips_to_default() {
     let parsed: Fixture = parse_str(&out).expect("generated must parse");
     assert_eq!(parsed, Fixture::default());
 }
+
+// ---- untagged enum struct variants (latent regressions #64/#65) ----------
+
+#[derive(Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(untagged)]
+enum CssSource {
+    Inline(String),
+    File { uri: String },
+}
+
+fn some_file_default() -> Option<CssSource> {
+    Some(CssSource::File { uri: "file:///x".to_string() })
+}
+
+/// Regression for #65: Option<untagged enum> must emit the STRUCT variant
+/// (parens), not mis-resolve to a free-form map ({braces}) or the string
+/// variant. unwrap_nullable previously picked the FIRST non-null anyOf
+/// schema (the string one) regardless of the value's JSON shape.
+#[derive(Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+struct UntaggedOptionalFixture {
+    /// Untagged optional source.
+    #[serde(default = "some_file_default")]
+    css: Option<CssSource>,
+}
+
+impl Default for UntaggedOptionalFixture {
+    fn default() -> Self {
+        Self {
+            css: some_file_default(),
+        }
+    }
+}
+
+#[test]
+fn untagged_option_struct_variant_emits_ron_struct_parens() {
+    let out = generate_default::<UntaggedOptionalFixture>("test-tool").expect("generation succeeds");
+    // An object value under an object-variant schema → RON struct parens.
+    assert!(out.contains("css: Some((\n        uri: \"file:///x\",\n    )),"), "wrong shape:\n{out}");
+    let parsed: UntaggedOptionalFixture = parse_str(&out).expect("generated must parse");
+    assert_eq!(
+        parsed.css,
+        some_file_default(),
+        "generated text must round-trip to the Some(File) default"
+    );
+}
