@@ -142,6 +142,57 @@ let css_cache_dir = cfg
     let quit = CancellationToken::new();
     let rebind = Arc::new(Notify::new());
 
+    // Channel-scoped Helix (reward titles, redemptions) — present only when
+    // `--auth` has stored a user token for this client_id.
+    let helix = Arc::new(
+        quiver_twitch::HelixClient::new(
+            cfg.twitch.client_id.clone().unwrap_or_default(),
+            cfg.twitch.client_secret.clone().unwrap_or_default(),
+        )
+        .expect("helix client builds")
+        .with_channel_auth(),
+    );
+    let reward_titles: engine::SharedRewardTitles = Arc::new(RwLock::new(HashMap::new()));
+    let redeem_deduper: engine::SharedRedeemDeduper = Arc::new(Mutex::new(engine::RedeemDeduper::default()));
+    if helix.has_channel_auth() {
+        info!(
+            user = ?helix.channel_login(),
+            scopes = helix.channel_scopes().len(),
+            "channel oauth loaded — channel-scoped features enabled"
+        );
+        let helix = helix.clone();
+        let reward_titles = reward_titles.clone();
+        let live_for_titles = live.clone();
+        let quit = quit.clone();
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(Duration::from_secs(600));
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                tokio::select! {
+                    _ = quit.cancelled() => return,
+                    _ = ticker.tick() => {
+                        let broadcaster = match live_for_titles.read().map(|l| l.channel.clone()) {
+                            Ok(ch) => ch,
+                            Err(_) => continue,
+                        };
+                        match crate::serve::channel_broadcaster_id(&helix, &broadcaster).await {
+                            Some(bid) => match helix.custom_reward_titles(&bid).await {
+                                Ok(map) => {
+                                    if let Ok(mut t) = reward_titles.write() {
+                                        *t = map;
+                                    }
+                                    debug!("reward title cache refreshed");
+                                }
+                                Err(e) => warn!(error = %e, "reward title refresh failed"),
+                            },
+                            None => {}
+                        }
+                    }
+                }
+            }
+        });
+    }
+
     // Ctrl-C cancels `quit`; every component observes it.
     {
         let quit = quit.clone();
@@ -159,7 +210,92 @@ let css_cache_dir = cfg
         .map_err(|e| anyhow::anyhow!("filters failed to compile: {e}"))?;
     let filters: crate::filters::SharedCompiled = Arc::new(RwLock::new(Some(compiled_filters)));
 
-    let feed = spawn_feed(live.clone(), messages.clone(), tx.clone(), filters.clone());
+    if helix.has_channel_auth() {
+        // Redemption poller (needs `filters`, defined just above). See Phase C.
+        // Redemption poller: emits redeem events for rewards that never
+        // reach IRC chat (input-free redemptions are invisible to PRIVMSG).
+        // IRC-driven duplicates are suppressed by the shared dedupe ring.
+        let helix = helix.clone();
+        let reward_titles = reward_titles.clone();
+        let live_for_poll = live.clone();
+        let quit = quit.clone();
+        let tx_for_poll = tx.clone();
+        let filters_for_poll = filters.clone();
+        let deduper_for_poll = redeem_deduper.clone();
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(Duration::from_secs(10));
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                tokio::select! {
+                    _ = quit.cancelled() => return,
+                    _ = ticker.tick() => {
+                        let broadcaster = match live_for_poll.read().map(|l| l.channel.clone()) {
+                            Ok(ch) => ch,
+                            Err(_) => continue,
+                        };
+                        let Some(bid) = crate::serve::channel_broadcaster_id(&helix, &broadcaster).await else {
+                            continue;
+                        };
+                        let Ok(redemptions) = helix.open_redemptions(&bid).await else {
+                            continue;
+                        };
+                        let now = now_epoch_secs();
+                        for r in redemptions {
+                            // Only recent ones: the poll is the SAFETY NET for
+                            // no-text rewards, not a replay of history.
+                            let age = now.saturating_sub(r.created_at_secs());
+                            if age > 120 {
+                                continue;
+                            }
+                            let key = format!("{}|{}", r.user_login, r.reward_id);
+                            let fresh = deduper_for_poll
+                                .lock()
+                                .map(|mut d| d.check_and_mark(key))
+                                .unwrap_or(false);
+                            if !fresh {
+                                continue;
+                            }
+                            let title = reward_titles
+                                .read()
+                                .ok()
+                                .and_then(|m| m.get(&r.reward_id).cloned());
+                            if !crate::filters::CompiledFilters::permits_event(
+                                &filters_for_poll,
+                                crate::filters::MsgKind::Redeem,
+                                &r.user_login,
+                                &r.user_display_name,
+                                &r.user_id,
+                                &r.user_input,
+                            ) {
+                                continue;
+                            }
+                            let wire = serde_json::json!({
+                                "type": "event",
+                                "event": {
+                                    "kind": "redeem",
+                                    "user_login": r.user_login,
+                                    "display_name": r.user_display_name,
+                                    "reward_title": title,
+                                    "user_input": r.user_input,
+                                }
+                            });
+                            let _ = tx_for_poll.send(wire.to_string());
+                        }
+                    }
+                }
+            }
+        });
+
+    }
+
+    let feed = spawn_feed(
+        live.clone(),
+        messages.clone(),
+        tx.clone(),
+        filters.clone(),
+        reward_titles.clone(),
+        redeem_deduper.clone(),
+    );
 
     // Frontend hot reload: watch the widget dir, push {type:reload} frames.
     let (fe_watch_tx, fe_watch_rx) = tokio::sync::mpsc::unbounded_channel::<Option<PathBuf>>();
@@ -168,6 +304,41 @@ let css_cache_dir = cfg
         fe_watch_rx,
         tx.clone(),
     );
+
+    // EventSub WebSocket (Phase D): real-time redeems (with reward titles
+    // inline), hype trains, predictions, polls — same broadcast channel.
+    if helix.has_channel_auth() {
+        // EventSub WebSocket: real-time redeems (with reward titles inline),
+        // hype trains, predictions, polls. Same broadcast channel. The
+        // message_type filters gate each mapped frame via the `gate` closure
+        // (kind string -> MsgKind -> permits_event).
+        let helix = helix.clone();
+        let live_for_es = live.clone();
+        let quit = quit.clone();
+        let tx_for_es = tx.clone();
+        let filters_for_es = filters.clone();
+        let gate = Arc::new(move |kind: &str| {
+            let Some(kind_enum) = crate::filters::MsgKind::parse(kind) else {
+                return false;
+            };
+            crate::filters::CompiledFilters::permits_event(
+                &filters_for_es,
+                kind_enum,
+                "",
+                "",
+                "",
+                "",
+            )
+        });
+        tokio::spawn(async move {
+            // Resolve broadcaster once per process; channel swaps are rare
+            // and the IRC feed already covers the interim.
+            let Some(bid) = crate::serve::channel_broadcaster_id(&helix, &live_for_es.read().map(|l| l.channel.clone()).unwrap_or_default()).await else {
+                return;
+            };
+            quiver_twitch::eventsub::spawn(helix, bid, tx_for_es, quit, gate);
+        });
+    }
 
     let ctx = crate::reload::ReloadCtx {
         live: live.clone(),
@@ -291,6 +462,8 @@ fn spawn_feed(
     messages: engine::SharedState,
     tx: broadcast::Sender<String>,
     filters: crate::filters::SharedCompiled,
+    reward_titles: engine::SharedRewardTitles,
+    redeem_deduper: engine::SharedRedeemDeduper,
 ) -> FeedHandle {
     let (swap_tx, swap_rx) = mpsc::unbounded_channel::<String>();
     let swap_rx = Arc::new(tokio::sync::Mutex::new(swap_rx));
@@ -302,6 +475,8 @@ fn spawn_feed(
                 messages.clone(),
                 tx.clone(),
                 filters.clone(),
+                reward_titles.clone(),
+                redeem_deduper.clone(),
                 swap_rx.clone(),
             ));
             match session.await {
@@ -332,6 +507,8 @@ async fn feed_session(
     messages: engine::SharedState,
     tx: broadcast::Sender<String>,
     filters: crate::filters::SharedCompiled,
+    reward_titles: engine::SharedRewardTitles,
+    redeem_deduper: engine::SharedRedeemDeduper,
     swap_rx: Arc<tokio::sync::Mutex<mpsc::UnboundedReceiver<String>>>,
 ) {
     let mut backoff = INITIAL_BACKOFF;
@@ -370,6 +547,8 @@ async fn feed_session(
                     messages.clone(),
                     tx.clone(),
                     filters.clone(),
+                    reward_titles.clone(),
+                    redeem_deduper.clone(),
                     &mut source
                 ));
                 tokio::select! {
@@ -450,6 +629,25 @@ fn swap_channel(
 }
 
 // ---- badges ---------------------------------------------------------------
+
+/// Broadcaster id for the channel via app-token Helix; None on failure
+/// (the refresher treats it as "nothing to do this tick").
+async fn channel_broadcaster_id(helix: &quiver_twitch::HelixClient, channel: &str) -> Option<String> {
+    match helix.user_id(channel).await {
+        Ok(id) => Some(id),
+        Err(e) => {
+            warn!(channel = %channel, error = %e, "broadcaster id lookup failed");
+            None
+        }
+    }
+}
+
+fn now_epoch_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
 
 pub(crate) async fn load_badge_map(
     client_id: &str,

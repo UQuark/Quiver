@@ -108,6 +108,22 @@ pub struct MysteryGiftEvent {
     pub tier: String,
 }
 
+/// A channel point reward redemption with user input. From IRC PRIVMSG
+/// carrying the `custom-reward-id` tag. The reward NAME is not on the wire —
+/// resolve it via Helix (`custom_reward_titles`) when channel OAuth exists.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RedeemEvent {
+    pub channel_login: String,
+    pub user_id: String,
+    pub user_login: String,
+    pub display_name: String,
+    /// UUID of the redeemed custom reward.
+    pub reward_id: String,
+    /// The text the redeemer typed (may be empty for input-free rewards —
+    /// those never reach chat, so this is usually non-empty).
+    pub user_input: String,
+}
+
 /// An incoming raid. From USERNOTICE `raid`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RaidEvent {
@@ -137,6 +153,8 @@ pub enum Event {
     GiftSub(GiftSubEvent),
     MysteryGift(MysteryGiftEvent),
     Raid(RaidEvent),
+    /// A channel point reward redemption (PRIVMSG with custom-reward-id).
+    Redeem(RedeemEvent),
     /// A message was deleted by a moderator/streamer (IRC CLEARMSG).
     MessageDeleted(MessageDeleted),
     /// The whole chat was cleared (IRC CLEARCHAT, ChatCleared action).

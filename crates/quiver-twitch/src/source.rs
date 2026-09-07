@@ -12,7 +12,7 @@ use twitch_irc::{ClientConfig, SecureTCPTransport, TwitchIRCClient};
 use crate::error::TwitchError;
 use crate::events::{
     Badge, ChatMessage, EmoteRef, Event, GifRef, GiftSubEvent, MessageDeleted, MysteryGiftEvent,
-    RaidEvent, SubEvent,
+    RaidEvent, RedeemEvent, SubEvent,
 };
 
 type Client = TwitchIRCClient<SecureTCPTransport, StaticLoginCredentials>;
@@ -55,7 +55,23 @@ impl IrcChatSource {
     pub async fn next_event(&mut self) -> Option<Event> {
         loop {
             match self.incoming.recv().await? {
-                ServerMessage::Privmsg(pm) => return Some(Event::ChatMessage(map_privmsg(pm))),
+                ServerMessage::Privmsg(pm) => {
+                    // Channel point redemption: PRIVMSG rides a
+                    // custom-reward-id tag. Twitch sends the reward NAME in
+                    // neither IRC tags nor this message — resolve via Helix
+                    // when channel OAuth exists.
+                    if let Some(reward_id) = pm.source.tags.0.get("custom-reward-id") {
+                        return Some(Event::Redeem(RedeemEvent {
+                            channel_login: pm.channel_login,
+                            user_id: pm.sender.id,
+                            user_login: pm.sender.login,
+                            display_name: pm.sender.name,
+                            reward_id: reward_id.to_string(),
+                            user_input: pm.message_text,
+                        }));
+                    }
+                    return Some(Event::ChatMessage(map_privmsg(pm)));
+                }
                 ServerMessage::ClearMsg(cm) => {
                     return Some(Event::MessageDeleted(MessageDeleted {
                         message_id: cm.message_id,

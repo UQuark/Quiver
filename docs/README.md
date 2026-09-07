@@ -17,7 +17,8 @@ Everything here is written for users. Pick a page:
 - [Badges](badges.md) — native Twitch badges, custom per-role/per-user badges, caching
 - [Custom CSS](custom-css.md) — inline or file/URL sources, per-role CSS, themes
 - [Filters](filters.md) — allow/deny lists per dimension (user, role, content, …)
-- [Stream Events](events.md) — subs, gift subs, mystery gifts, raids
+- [Stream Events](events.md) — subs, gift subs, mystery gifts, raids, redeems, hype trains
+- [Channel OAuth](oauth.md) — `--auth` device flow: reward names, redemptions, EventSub events
 - [Moderation](moderation.md) — message deletion, whole-chat clear, GIF keyboard messages
 
 ## Behind the scenes
