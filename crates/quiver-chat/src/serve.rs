@@ -155,6 +155,11 @@ let css_cache_dir = cfg
     let reward_titles: engine::SharedRewardTitles = Arc::new(RwLock::new(HashMap::new()));
     let redeem_deduper: engine::SharedRedeemDeduper = Arc::new(Mutex::new(engine::RedeemDeduper::default()));
     if helix.has_channel_auth() {
+        info!(
+            user = ?helix.channel_login(),
+            scopes = helix.channel_scopes().len(),
+            "channel oauth loaded — channel-scoped features enabled"
+        );
         let helix = helix.clone();
         let reward_titles = reward_titles.clone();
         let live_for_titles = live.clone();
