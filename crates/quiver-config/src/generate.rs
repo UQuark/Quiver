@@ -131,7 +131,11 @@ fn wrap_comment(text: &str) -> Vec<String> {
     for paragraph in text.split('\n') {
         let mut current = String::new();
         for word in paragraph.split_whitespace() {
-            if !current.is_empty() && current.chars().count() + word.len() + 1 > COMMENT_WIDTH {
+            // CHAR count on both sides: word.len() is BYTES and for any
+            // multi-byte word (é, emoji, CJK) it over-counted, firing the
+            // wrap early and producing lines shorter than COMMENT_WIDTH.
+            let word_chars = word.chars().count();
+            if !current.is_empty() && current.chars().count() + word_chars + 1 > COMMENT_WIDTH {
                 lines.push(std::mem::take(&mut current));
             }
             if !current.is_empty() {
@@ -384,4 +388,33 @@ pub(crate) fn escape_ron_string(s: &str) -> String {
     }
     out.push('"');
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Regression for #63: the wrap condition compared CHARS of the current
+    /// line against BYTES of the next word — a multi-byte word (é, emoji,
+    /// CJK) over-counted and wrapped early. A line that fits exactly within
+    /// COMMENT_WIDTH must not split.
+    #[test]
+    fn wrap_comment_counts_chars_not_bytes_on_both_sides() {
+        let width = COMMENT_WIDTH;
+        // 70 ASCII chars + space + "é" (1 char, 2 bytes) = 72 chars — fits
+        // exactly, must NOT wrap. The byte-counting bug fired here (73 > 72).
+        let text = format!("{} é", "a".repeat(width - 2));
+        let lines = wrap_comment(&text);
+        assert_eq!(lines.len(), 1, "line that fits exactly must not wrap: {lines:?}");
+        assert_eq!(lines[0].chars().count(), width, "wrapped line shortchanged");
+    }
+
+    /// Sanity: the boundary still wraps for genuinely overflowing words.
+    #[test]
+    fn wrap_comment_still_wraps_when_line_overflows() {
+        // 71 chars + space + "ab" (2 chars) = 74 > 72 → must wrap.
+        let text = format!("{} ab", "a".repeat(COMMENT_WIDTH - 1));
+        let lines = wrap_comment(&text);
+        assert_eq!(lines.len(), 2, "overflowing line must wrap");
+    }
 }
