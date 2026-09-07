@@ -188,14 +188,32 @@ async fn apply_reload(path: &Path, ctx: &ReloadCtx) {
         return;
     }
 
-    // 5. Apply in canonical order (see planned_actions docs).
+    // 5. Publish the new live view FIRST so every reader observes the new
+    //    config atomically. This is what makes a reload atomic for readers:
+    //    pump's channel gate (engine.rs), message lifetime, and the HTTP
+    //    layer's listen/widget_dist reads all see the new config from here
+    //    on. Swapping only at the end left a mixed-state window spanning the
+    //    network-awaited actions below (RefreshEmotes/RefreshBadges/
+    //    RefreshCss/ResolveBadges can take seconds), during which pump's
+    //    expected_channel gate still read the OLD login and dropped the new
+    //    channel's messages, and a Rebind notify could fire before live held
+    //    the new listen address.
+    if let Ok(mut live) = ctx.live.write() {
+        *live = new_live.clone();
+    } else {
+        warn!("config reload aborted (live lock poisoned) — keeping current config");
+        return;
+    }
+
+    // 6. Apply in canonical order (see planned_actions docs). Store writes
+    //    and the feed swap now run against the already-published config; the
+    //    SwapChannel action follows within microseconds (SetMax/SetWidgetDist
+    //    are non-blocking), so the straggler gate at most drops the old
+    //    channel for a tiny window instead of the new channel for seconds.
     for action in &actions {
         apply_action(ctx, action, &new_live).await;
     }
 
-    if let Ok(mut live) = ctx.live.write() {
-        *live = new_live;
-    }
     info!(actions = ?actions, "configuration reloaded");
 }
 
@@ -377,10 +395,9 @@ async fn apply_action(ctx: &ReloadCtx, action: &Action, new_live: &LiveConfig) {
             info!("custom css source resolved");
         }
         Action::BroadcastMeta => {
-            // IMPORTANT: build from new_live, NOT ctx.live — during apply,
-            // the shared slot still holds the OLD config (it is swapped in
-            // only after all actions ran). Reading it here broadcasts the
-            // previous state, making every reload appear one-behind.
+            // Build from new_live explicitly — it is the source of truth for
+            // this reload (live is published before actions run). The store
+            // snapshots (badges/custom_css) are read for the meta payload.
             let badges = ctx.badges.read().map(|b| b.clone()).unwrap_or_default();
             let custom = ctx
                 .custom_badges
