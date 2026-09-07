@@ -456,7 +456,8 @@ impl Validate for ChatConfig {
                         path: "filters.message_type.items".to_string(),
                         message: format!(
                             "unknown message kind {item:?} \u{2014} expected one of: \
-                             message, sub, gift_sub, mystery_gift, raid, redeem"
+                             message, sub, gift_sub, mystery_gift, raid, redeem,
+                             hype_train, prediction, poll"
                         ),
                     });
                 }

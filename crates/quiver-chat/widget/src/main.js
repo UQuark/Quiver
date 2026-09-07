@@ -470,6 +470,9 @@ const EVENT_STYLES = {
   mystery_gift: { icon: "🎁🎁", bg: "rgba(145,70,255,.22)", border: "#9146FF" },
   raid: { icon: "⚔", bg: "rgba(255,140,0,.22)", border: "#FF8C00" },
   redeem: { icon: "🏅", bg: "rgba(0,180,216,.22)", border: "#00B4D8" },
+  hype_train: { icon: "🚂", bg: "rgba(255,0,110,.22)", border: "#FF006E" },
+  prediction: { icon: "📊", bg: "rgba(0,120,255,.18)", border: "#0078FF" },
+  poll: { icon: "🗳️", bg: "rgba(0,200,120,.18)", border: "#00C878" },
 };
 const EVENT_BANNER_MS = 8000;
 
@@ -504,6 +507,23 @@ function showEvent(ev) {
         : `${ev.display_name} redeemed ${reward}`;
       break;
     }
+    case "hype_train": {
+      const top = (ev.top_display_names || []).slice(0, 3).join(", ");
+      text = ev.phase === "end"
+        ? `Hype Train ended at level ${ev.level}!`
+        : `Hype Train level ${ev.level} — ${ev.total}/${ev.goal}${top ? ` · ${top}` : ""}`;
+      break;
+    }
+    case "prediction":
+      text = ev.phase === "end"
+        ? `Prediction resolved: ${ev.title} → ${ev.winning_outcome || "?"}`
+        : `${ev.phase === "lock" ? "Predictions locked" : "Prediction started"}: ${ev.title}`;
+      break;
+    case "poll":
+      text = ev.phase === "end"
+        ? `Poll ended: ${ev.title}`
+        : `${ev.phase === "lock" ? "Poll locked" : "Poll started"}: ${ev.title}`;
+      break;
   }
   banner.append(el("span", "event-icon", style.icon), el("span", "event-text", text));
 

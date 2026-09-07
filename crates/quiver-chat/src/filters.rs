@@ -25,6 +25,9 @@ pub enum MsgKind {
     MysteryGift,
     Raid,
     Redeem,
+    HypeTrain,
+    Prediction,
+    Poll,
 }
 
 impl MsgKind {
@@ -36,6 +39,9 @@ impl MsgKind {
             "mystery_gift" => Some(Self::MysteryGift),
             "raid" => Some(Self::Raid),
             "redeem" => Some(Self::Redeem),
+            "hype_train" => Some(Self::HypeTrain),
+            "prediction" => Some(Self::Prediction),
+            "poll" => Some(Self::Poll),
             _ => None,
         }
     }
@@ -49,6 +55,9 @@ impl MsgKind {
             Self::MysteryGift => "mystery_gift",
             Self::Raid => "raid",
             Self::Redeem => "redeem",
+            Self::HypeTrain => "hype_train",
+            Self::Prediction => "prediction",
+            Self::Poll => "poll",
         }
     }
 }

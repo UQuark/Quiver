@@ -106,6 +106,52 @@ impl HelixClient {
             .and_then(|t| t.channel_login())
     }
 
+    /// Scopes granted to the channel token (empty without OAuth).
+    pub fn channel_scopes(&self) -> Vec<String> {
+        self.channel
+            .read()
+            .unwrap()
+            .as_ref()
+            .map(|t| t.scopes())
+            .unwrap_or_default()
+    }
+
+    /// POST an EventSub subscription (websocket transport, user token).
+    pub async fn create_eventsub_subscription(
+        &self,
+        body: &serde_json::Value,
+    ) -> Result<(), HelixError> {
+        let channel_token = {
+            let guard = self.channel.read().unwrap();
+            match guard.as_ref() {
+                Some(t) => t.clone(),
+                None => {
+                    return Err(HelixError::ChannelAuthRequired(
+                        "run `quiver-chat --auth` to enable EventSub".to_string(),
+                    ))
+                }
+            }
+        };
+        let token = channel_token.access_token().await?;
+        let resp = self
+            .http
+            .post(format!("{HELIX_URL}/eventsub/subscriptions"))
+            .header("Client-Id", &self.client_id)
+            .bearer_auth(token)
+            .json(body)
+            .send()
+            .await?;
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(HelixError::Api {
+                status: status.as_u16(),
+                body,
+            });
+        }
+        Ok(())
+    }
+
     /// Valid app access token; fetches a fresh one when missing/expiring.
     async fn app_token(&self) -> Result<String, HelixError> {
         // Fast path: cached token still valid past the refresh margin.

@@ -46,12 +46,14 @@ hex = "0.4"
 
 # helix api (badges)
 reqwest = { version = "0.13", features = ["json", "query", "form"] }
+tokio-tungstenite = { version = "0.28", features = ["native-tls"] }
 
 # config hot reload
 lightningcss = "=1.0.0-alpha.72"
 notify = "8"
 notify-debouncer-full = "0.7"
 tokio-util = "0.7"
+futures-util = "0.3"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

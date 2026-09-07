@@ -280,6 +280,7 @@ let css_cache_dir = cfg
                 }
             }
         });
+
     }
 
     let feed = spawn_feed(
@@ -298,6 +299,41 @@ let css_cache_dir = cfg
         fe_watch_rx,
         tx.clone(),
     );
+
+    // EventSub WebSocket (Phase D): real-time redeems (with reward titles
+    // inline), hype trains, predictions, polls — same broadcast channel.
+    if helix.has_channel_auth() {
+        // EventSub WebSocket: real-time redeems (with reward titles inline),
+        // hype trains, predictions, polls. Same broadcast channel. The
+        // message_type filters gate each mapped frame via the `gate` closure
+        // (kind string -> MsgKind -> permits_event).
+        let helix = helix.clone();
+        let live_for_es = live.clone();
+        let quit = quit.clone();
+        let tx_for_es = tx.clone();
+        let filters_for_es = filters.clone();
+        let gate = Arc::new(move |kind: &str| {
+            let Some(kind_enum) = crate::filters::MsgKind::parse(kind) else {
+                return false;
+            };
+            crate::filters::CompiledFilters::permits_event(
+                &filters_for_es,
+                kind_enum,
+                "",
+                "",
+                "",
+                "",
+            )
+        });
+        tokio::spawn(async move {
+            // Resolve broadcaster once per process; channel swaps are rare
+            // and the IRC feed already covers the interim.
+            let Some(bid) = crate::serve::channel_broadcaster_id(&helix, &live_for_es.read().map(|l| l.channel.clone()).unwrap_or_default()).await else {
+                return;
+            };
+            quiver_twitch::eventsub::spawn(helix, bid, tx_for_es, quit, gate);
+        });
+    }
 
     let ctx = crate::reload::ReloadCtx {
         live: live.clone(),

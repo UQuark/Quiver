@@ -7,6 +7,7 @@
 //! touching them.
 
 pub mod auth;
+pub mod eventsub;
 pub mod error;
 pub mod events;
 pub mod helix;
