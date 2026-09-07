@@ -295,9 +295,19 @@ pub(crate) fn spawn_frontend_watcher(
         // Initial target.
         let _ = bridge_tx.send(BridgeMsg::SetDir(initial_dir));
 
-        // Coalescing loop: at most one reload frame per MIN_INTERVAL.
+        // Coalescing loop: at most one reload frame per MIN_INTERVAL, but a
+        // trigger suppressed inside the window must be CATCH-UP'd — bundle
+        // writes land within the same second and the trailing write must
+        // not be dropped forever (the old code discarded it and only a
+        // later write after the window would re-arm the reload).
         let mut last_sent: Option<tokio::time::Instant> = None;
+        // Trailing-catch-up deadline: armed when a trigger is suppressed,
+        // fires one MIN_INTERVAL after the last send.
+        let mut until: Option<tokio::time::Instant> = None;
         loop {
+            // Copy so the trailing arm can own it (Instant is Copy); set
+            // in the trigger arm below for the NEXT loop iteration.
+            let until_snapshot = until;
             tokio::select! {
                 msg = ctrl_rx.recv() => {
                     // None = all senders dropped (shutdown).
@@ -314,9 +324,28 @@ pub(crate) fn spawn_frontend_watcher(
                     };
                     if due {
                         last_sent = Some(now);
+                        until = None;
                         info!("widget frontend changed — reloading connected pages");
                         let _ = tx.send(r#"{"type":"reload"}"#.to_string());
+                    } else {
+                        // Suppressed inside the window: guarantee a trailing
+                        // send one interval after the last one instead of
+                        // dropping the change entirely.
+                        if until.is_none() {
+                            until = Some(last_sent.unwrap() + MIN_INTERVAL);
+                        }
                     }
+                }
+                _ = async {
+                    match until_snapshot {
+                        Some(u) => tokio::time::sleep_until(u).await,
+                        None => std::future::pending::<()>().await,
+                    }
+                }, if until_snapshot.is_some() => {
+                    until = None;
+                    last_sent = Some(tokio::time::Instant::now());
+                    info!("widget frontend changed — reloading connected pages (trailing)");
+                    let _ = tx.send(r#"{"type":"reload"}"#.to_string());
                 }
             }
         }
