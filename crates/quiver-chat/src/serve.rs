@@ -179,10 +179,16 @@ let css_cache_dir = cfg
                         match crate::serve::channel_broadcaster_id(&helix, &broadcaster).await {
                             Some(bid) => match helix.custom_reward_titles(&bid).await {
                                 Ok(map) => {
+                                    let with_icon =
+                                        map.values().filter(|i| i.image_url.is_some()).count();
+                                    info!(
+                                        rewards = map.len(),
+                                        with_icon,
+                                        "reward info cache refreshed"
+                                    );
                                     if let Ok(mut t) = reward_titles.write() {
                                         *t = map;
                                     }
-                                    debug!("reward info cache refreshed");
                                 }
                                 Err(e) => warn!(error = %e, "reward title refresh failed"),
                             },

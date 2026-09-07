@@ -536,12 +536,23 @@ function showEvent(ev) {
       break;
   }
   // Icon: redeems (and any event carrying a reward image) show the REAL
-  // Twitch reward icon; other kinds keep their text icon.
+  // Twitch reward icon. Rewards using Twitch's default icon have no image
+  // in the API — fall back to an inline SVG of the channel-points coin.
   if (ev.reward_image) {
     const icon = document.createElement("img");
     icon.className = "event-icon event-icon-img";
     icon.src = ev.reward_image;
     icon.alt = "";
+    banner.append(icon);
+  } else if (ev.kind === "redeem") {
+    const icon = document.createElement("span");
+    icon.className = "event-icon";
+    // Channel-points coin: gold circle with the Twitch glitch.
+    icon.innerHTML =
+      '<svg viewBox="0 0 16 16" width="1.4em" height="1.4em" style="vertical-align:middle">' +
+      '<circle cx="8" cy="8" r="7.2" fill="#FABE2E" stroke="#9147FF" stroke-width="1.6"/>' +
+      '<path d="M11.4 5.2c-.5-.5-1.4-.9-3.4-.9-1.4 0-2.6.4-3.4.9L3.2 8l1.4 2.8c.8.5 2 .9 3.4.9s2.6-.4 3.4-.9L12.8 8l-1.4-2.8z" fill="#9147FF"/>' +
+      "</svg>";
     banner.append(icon);
   } else {
     banner.append(el("span", "event-icon", style.icon));
