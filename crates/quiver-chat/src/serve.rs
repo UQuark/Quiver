@@ -159,6 +159,16 @@ let css_cache_dir = cfg
     // without a custom uploaded icon. None = fetch failed/unresolved —
     // the widget falls back to its SVG coin.
     let coin_icon: Arc<RwLock<Option<String>>> = Arc::new(RwLock::new(None));
+    // Event-driven refresh signals (no ticker — see refresher below):
+    // - swap_gen: bumped by the reload layer on SwapChannel (a bounce
+    //   also retargets EventSub via broadcaster_slot)
+    // - miss_gen: bumped by pump/poller on a reward-cache miss (new
+    //   reward mid-stream) — self-healing without idle polling
+    // - broadcaster_slot: current broadcaster id; EventSub reads it per
+    //   session so a swap re-targets subscriptions.
+    let swap_gen = Arc::new(Notify::new());
+    let miss_gen = Arc::new(Notify::new());
+    let broadcaster_slot: Arc<RwLock<Option<String>>> = Arc::new(RwLock::new(None));
     if helix.has_channel_auth() {
         info!(
             user = ?helix.channel_login(),
@@ -170,47 +180,82 @@ let css_cache_dir = cfg
         let live_for_titles = live.clone();
         let quit = quit.clone();
         let coin_for_refresh = coin_icon.clone();
+        let broadcaster_for_refresh = broadcaster_slot.clone();
+        let swap_for_refresh = swap_gen.clone();
+        let miss_for_refresh = miss_gen.clone();
         tokio::spawn(async move {
-            let mut ticker = tokio::time::interval(Duration::from_secs(600));
-            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-            loop {
-                tokio::select! {
-                    _ = quit.cancelled() => return,
-                    _ = ticker.tick() => {
-                        let broadcaster = match live_for_titles.read().map(|l| l.channel.clone()) {
-                            Ok(ch) => ch,
-                            Err(_) => continue,
-                        };
-                        // Channel coin (anonymous GQL) — what Twitch shows
-                        // for default-icon rewards on this channel.
-                        match helix.coin_icon_url(&broadcaster).await {
-                            Some(url) => {
-                                if let Ok(mut c) = coin_for_refresh.write() {
-                                    *c = Some(url);
-                                }
-                            }
-                            None => warn!("coin icon lookup failed — keeping previous"),
-                        }
-                        match crate::serve::channel_broadcaster_id(&helix, &broadcaster).await {
-                            Some(bid) => match helix.custom_reward_titles(&bid).await {
-                                Ok(map) => {
-                                    let with_icon =
-                                        map.values().filter(|i| i.image_url.is_some()).count();
-                                    info!(
-                                        rewards = map.len(),
-                                        with_icon,
-                                        "reward info cache refreshed"
-                                    );
-                                    if let Ok(mut t) = reward_titles.write() {
-                                        *t = map;
-                                    }
-                                }
-                                Err(e) => warn!(error = %e, "reward title refresh failed"),
-                            },
-                            None => {}
+            // Refresh once per trigger: immediately on boot, on channel
+            // swap, or on a cache miss (cooldown 10s so a burst of misses
+            // coalesces). No idle ticker.
+            const COOLDOWN: Duration = Duration::from_secs(10);
+            let mut last_run = Option::<tokio::time::Instant>::None;
+            async fn refresh(
+                helix: &quiver_twitch::HelixClient,
+                live: &SharedLive,
+                coin: &Arc<RwLock<Option<String>>>,
+                reward_titles: &engine::SharedRewardTitles,
+                broadcaster_slot: &Arc<RwLock<Option<String>>>,
+            ) {
+                let broadcaster = match live.read().map(|l| l.channel.clone()) {
+                    Ok(ch) => ch,
+                    Err(_) => return,
+                };
+                // Channel coin (anonymous GQL) — what Twitch shows for
+                // default-icon rewards on this channel.
+                match helix.coin_icon_url(&broadcaster).await {
+                    Some(url) => {
+                        if let Ok(mut c) = coin.write() {
+                            *c = Some(url);
                         }
                     }
+                    None => warn!("coin icon lookup failed — keeping previous"),
                 }
+                match crate::serve::channel_broadcaster_id(helix, &broadcaster).await {
+                    Some(bid) => {
+                        if let Ok(mut slot) = broadcaster_slot.write() {
+                            *slot = Some(bid.clone());
+                        }
+                        match helix.custom_reward_titles(&bid).await {
+                            Ok(map) => {
+                                let with_icon =
+                                    map.values().filter(|i| i.image_url.is_some()).count();
+                                info!(
+                                    rewards = map.len(),
+                                    with_icon,
+                                    "reward info cache refreshed"
+                                );
+                                if let Ok(mut t) = reward_titles.write() {
+                                    *t = map;
+                                }
+                            }
+                            Err(e) => warn!(error = %e, "reward title refresh failed"),
+                        }
+                    }
+                    None => {}
+                }
+            }
+
+            refresh(&helix, &live_for_titles, &coin_for_refresh, &reward_titles, &broadcaster_for_refresh).await;
+            last_run = Some(tokio::time::Instant::now());
+            loop {
+                let swap_fut = swap_for_refresh.notified();
+                let miss_fut = miss_for_refresh.notified();
+                tokio::select! {
+                    _ = quit.cancelled() => return,
+                    _ = swap_fut => {
+                        info!("channel swapped — refreshing reward info + coin");
+                    }
+                    _ = miss_fut => {
+                        if let Some(t) = last_run
+                            && tokio::time::Instant::now().duration_since(t) < COOLDOWN
+                        {
+                            continue; // recent refresh — a single miss-burst already covered
+                        }
+                        debug!("reward cache miss — refreshing reward info");
+                    }
+                }
+                refresh(&helix, &live_for_titles, &coin_for_refresh, &reward_titles, &broadcaster_for_refresh).await;
+                last_run = Some(tokio::time::Instant::now());
             }
         });
     }
@@ -245,6 +290,7 @@ let css_cache_dir = cfg
         let filters_for_poll = filters.clone();
         let deduper_for_poll = redeem_deduper.clone();
         let coin_for_poll = coin_icon.clone();
+        let miss_for_poll = miss_gen.clone();
         tokio::spawn(async move {
             let mut ticker = tokio::time::interval(Duration::from_secs(10));
             ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -294,6 +340,11 @@ let css_cache_dir = cfg
                             let (title, mut image) = info
                                 .map(|i| (Some(i.title), i.image_url))
                                 .unwrap_or((None, None));
+                            // Cache miss = reward added mid-stream: trigger
+                            // the reactive refresher (cooldown in refresher).
+                            if title.is_none() {
+                                miss_for_poll.notify_one();
+                            }
                             // Default-icon rewards: channel coin fallback.
                             if image.is_none() {
                                 image = coin_for_poll.read().ok().and_then(|c| c.clone());
@@ -335,6 +386,7 @@ let css_cache_dir = cfg
         filters.clone(),
         reward_titles.clone(),
         coin_icon.clone(),
+        miss_gen.clone(),
         redeem_deduper.clone(),
     );
 
@@ -354,12 +406,13 @@ let css_cache_dir = cfg
         // message_type filters gate each mapped frame via the `gate` closure
         // (kind string -> MsgKind -> permits_event).
         let helix = helix.clone();
-        let live_for_es = live.clone();
         let quit = quit.clone();
         let tx_for_es = tx.clone();
         let filters_for_es = filters.clone();
         let deduper_for_es = redeem_deduper.clone();
-        let coin_for_es = coin_icon.read().ok().and_then(|c| c.clone());
+        let broadcaster_for_es = broadcaster_slot.clone();
+        let coin_slot_for_es = coin_icon.clone();
+        let swap_for_es = swap_gen.clone();
         let gate = Arc::new(move |kind: &str| {
             let Some(kind_enum) = crate::filters::MsgKind::parse(kind) else {
                 return false;
@@ -374,12 +427,20 @@ let css_cache_dir = cfg
             )
         });
         tokio::spawn(async move {
-            // Resolve broadcaster once per process; channel swaps are rare
-            // and the IRC feed already covers the interim.
-            let Some(bid) = crate::serve::channel_broadcaster_id(&helix, &live_for_es.read().map(|l| l.channel.clone()).unwrap_or_default()).await else {
-                return;
-            };
-            quiver_twitch::eventsub::spawn(helix, bid, tx_for_es, quit, gate, deduper_for_es, coin_for_es);
+            // EventSub re-targets on channel swap: the client reads the
+            // broadcaster + coin from shared slots (kept fresh by the
+            // reactive refresher) per session, and bounces its socket when a
+            // swap lands mid-stream.
+            quiver_twitch::eventsub::spawn(
+                helix,
+                broadcaster_for_es,
+                coin_slot_for_es,
+                tx_for_es,
+                quit,
+                gate,
+                deduper_for_es,
+                swap_for_es,
+            );
         });
     }
 
@@ -395,6 +456,7 @@ let css_cache_dir = cfg
         emotes: emotes.clone(),
         filters: filters.clone(),
         rebind: rebind.clone(),
+        channel_changed: swap_gen.clone(),
     };
     crate::reload::spawn_watcher(config_path, ctx, quit.clone());
 
@@ -507,6 +569,7 @@ fn spawn_feed(
     filters: crate::filters::SharedCompiled,
     reward_titles: engine::SharedRewardTitles,
     coin_icon: Arc<RwLock<Option<String>>>,
+    miss_gen: Arc<Notify>,
     redeem_deduper: engine::SharedRedeemDeduper,
 ) -> FeedHandle {
     let (swap_tx, swap_rx) = mpsc::unbounded_channel::<String>();
@@ -521,6 +584,7 @@ fn spawn_feed(
                 filters.clone(),
                 reward_titles.clone(),
                 coin_icon.clone(),
+                miss_gen.clone(),
                 redeem_deduper.clone(),
                 swap_rx.clone(),
             ));
@@ -554,6 +618,7 @@ async fn feed_session(
     filters: crate::filters::SharedCompiled,
     reward_titles: engine::SharedRewardTitles,
     coin_icon: Arc<RwLock<Option<String>>>,
+    miss_gen: Arc<Notify>,
     redeem_deduper: engine::SharedRedeemDeduper,
     swap_rx: Arc<tokio::sync::Mutex<mpsc::UnboundedReceiver<String>>>,
 ) {
@@ -595,6 +660,7 @@ async fn feed_session(
                     filters.clone(),
                     reward_titles.clone(),
                     coin_icon.clone(),
+                    miss_gen.clone(),
                     redeem_deduper.clone(),
                     &mut source
                 ));

@@ -33,6 +33,9 @@ pub(crate) struct ReloadCtx {
     pub feed_swap: mpsc::UnboundedSender<String>,
     pub fe_watch: mpsc::UnboundedSender<Option<PathBuf>>,
     pub rebind: Arc<Notify>,
+    /// Bumped on channel swap: the reward-info/coin refresher and EventSub
+    /// re-target immediately (no idle ticker in the serve layer).
+    pub channel_changed: Arc<Notify>,
 }
 
 /// Watch the config's parent directory (atomic-save editors REPLACE the
@@ -397,6 +400,8 @@ async fn apply_action(ctx: &ReloadCtx, action: &Action, new_live: &LiveConfig) {
         Action::SwapChannel(channel) => {
             // Supervisor parts/joins and broadcasts {"type":"clear"}.
             let _ = ctx.feed_swap.send(channel.clone());
+            // Reward-info/coin refresher + EventSub re-target immediately.
+            ctx.channel_changed.notify_one();
         }
         Action::RefreshBadges => match &new_live.creds {
             Some((id, secret)) => {

@@ -14,8 +14,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures_util::StreamExt;
-use tokio::sync::broadcast;
+use tokio::sync::{Notify, broadcast};
 use tokio_tungstenite::tungstenite::Message as WsMessage;
+use tracing::info;
 
 use crate::helix::HelixClient;
 
@@ -53,6 +54,15 @@ fn enabled_specs() -> Vec<SubSpec> {
 /// event frames onto `tx` (the same broadcast channel the engine uses).
 /// Exits when `quit` cancels; reconnects with backoff otherwise.
 ///
+/// Slots (kept fresh by the serve layer):
+/// - `broadcaster_slot`: current broadcaster id — re-read per session so a
+///   channel swap re-targets subscriptions without a restart
+/// - `coin_slot`: the channel's coin icon URL — read per session so
+///   default-icon redeem banners always carry the right coin
+///
+/// `swap`: notified by the reload layer on channel swap — bounces the
+/// active session so the re-target happens within ~seconds.
+///
 /// `gate`: called with the mapped event `kind` — false suppresses the frame
 /// (the chat layer's message_type filters flow through here as a closure,
 /// since quiver-twitch cannot depend on quiver-chat).
@@ -60,12 +70,13 @@ fn enabled_specs() -> Vec<SubSpec> {
 /// redemption ids and skips redemptions IRC already rendered moments ago.
 pub fn spawn(
     helix: Arc<HelixClient>,
-    broadcaster_id: String,
+    broadcaster_slot: Arc<std::sync::RwLock<Option<String>>>,
+    coin_slot: Arc<std::sync::RwLock<Option<String>>>,
     tx: broadcast::Sender<String>,
     quit: tokio_util::sync::CancellationToken,
     gate: Arc<dyn Fn(&str) -> bool + Send + Sync>,
     deduper: crate::dedupe::SharedRedeemDeduper,
-    coin_icon: Option<String>,
+    swap: Arc<Notify>,
 ) {
     tokio::spawn(async move {
         let mut backoff = Duration::from_secs(2);
@@ -73,23 +84,65 @@ pub fn spawn(
             if quit.is_cancelled() {
                 return;
             }
-            match run_session(&helix, &broadcaster_id, &tx, &quit, &gate, &deduper, &coin_icon).await {
-                SessionEnd::Quit => return,
-                SessionEnd::Reconnect(url) => {
-                    // Twitch asks us to move to a specific socket; reconnect
-                    // immediately and resubscribe there.
-                    let _ = url;
+            // Per-session state: broadcaster + coin read fresh from the
+            // slots, so a swap re-targets within one reconnect cycle.
+            let Some(broadcaster_id) = broadcaster_slot.read().ok().and_then(|s| s.clone()) else {
+                // Refresher hasn't populated the slot yet — wait for it
+                // (or a swap/quit).
+                tokio::select! {
+                    _ = quit.cancelled() => return,
+                    _ = swap.notified() => {}
+                    _ = tokio::time::sleep(Duration::from_millis(500)) => {}
+                }
+                continue;
+            };
+            let coin = coin_slot.read().ok().and_then(|c| c.clone());
+            // Own the session inputs (cheap clones) — the spawned task must
+            // be 'static while the supervisor keeps its loop locals.
+            let session_helix = helix.clone();
+            let session_broadcaster = broadcaster_id.clone();
+            let session_tx = tx.clone();
+            let session_quit = quit.clone();
+            let session_gate = gate.clone();
+            let session_deduper = deduper.clone();
+            let mut session = tokio::spawn(run_session(
+                session_helix,
+                session_broadcaster,
+                session_tx,
+                session_quit,
+                session_gate,
+                session_deduper,
+                coin,
+            ));
+            tokio::select! {
+                res = &mut session => match res {
+                    Ok(_) => {
+                        // Clean end happens only on shutdown paths.
+                        tracing::info!("eventsub session ended");
+                        tokio::time::sleep(Duration::from_secs(2)).await;
+                    }
+                    Err(e) => {
+                        if e.is_panic() {
+                            tracing::warn!(error = %e, "eventsub session panicked — reconnecting");
+                        } else {
+                            tracing::warn!(error = %e, "eventsub session cancelled — reconnecting");
+                        }
+                        tokio::time::sleep(backoff).await;
+                        backoff = (backoff * 2).min(Duration::from_secs(60));
+                    }
+                },
+                _ = quit.cancelled() => {
+                    session.abort();
+                    return;
+                }
+                _ = swap.notified() => {
+                    // Channel swap: bounce the socket so the next session
+                    // subscribes against the new broadcaster.
+                    session.abort();
+                    info!("eventsub re-targeting on channel swap");
                     backoff = Duration::from_secs(2);
                 }
-                SessionEnd::Dropped => {
-                    tracing::warn!(backoff_secs = backoff.as_secs(), "eventsub dropped — reconnecting");
-                }
             }
-            tokio::select! {
-                _ = quit.cancelled() => return,
-                _ = tokio::time::sleep(backoff) => {}
-            }
-            backoff = (backoff * 2).min(Duration::from_secs(60));
         }
     });
 }
@@ -102,13 +155,13 @@ enum SessionEnd {
 
 /// One websocket session: welcome → subscribe → notifications.
 async fn run_session(
-    helix: &HelixClient,
-    broadcaster_id: &str,
-    tx: &broadcast::Sender<String>,
-    quit: &tokio_util::sync::CancellationToken,
-    gate: &Arc<dyn Fn(&str) -> bool + Send + Sync>,
-    deduper: &crate::dedupe::SharedRedeemDeduper,
-    coin_icon: &Option<String>,
+    helix: Arc<HelixClient>,
+    broadcaster_id: String,
+    tx: broadcast::Sender<String>,
+    quit: tokio_util::sync::CancellationToken,
+    gate: Arc<dyn Fn(&str) -> bool + Send + Sync>,
+    deduper: crate::dedupe::SharedRedeemDeduper,
+    coin_icon: Option<String>,
 ) -> SessionEnd {
     let (ws, _resp) = match tokio_tungstenite::connect_async(EVENTSUB_WS_URL).await {
         Ok(x) => x,
@@ -213,7 +266,7 @@ async fn run_session(
                 match message_type {
                     "notification" => {
                         let sub_type = v["metadata"]["subscription_type"].as_str().unwrap_or("");
-                        if let Some(frame) = map_event(sub_type, &v["payload"]["event"], coin_icon)
+                        if let Some(frame) = map_event(sub_type, &v["payload"]["event"], &coin_icon)
                             && gate(frame["event"]["kind"].as_str().unwrap_or(""))
                         {
                             // Redeem frames dedupe cross-source (redemption

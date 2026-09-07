@@ -9,6 +9,8 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
+use tokio::sync::Notify;
+
 use crate::filters::MsgKind;
 use quiver_twitch::{
     Badge, ChatMessage, EmoteRef, Event, GifRef, GiftSubEvent, MessageDeleted, MysteryGiftEvent,
@@ -400,6 +402,7 @@ pub async fn pump(
     filters: crate::filters::SharedCompiled,
     reward_titles: SharedRewardTitles,
     coin_icon: Arc<RwLock<Option<String>>>,
+    reward_miss_notify: Arc<Notify>,
     redeem_deduper: SharedRedeemDeduper,
     source: &mut quiver_twitch::IrcChatSource,
 ) {
@@ -502,6 +505,12 @@ pub async fn pump(
                             .and_then(|m| m.get(&r.reward_id).cloned())
                             .map(|info| (Some(info.title), info.image_url))
                             .unwrap_or((None, None));
+                        // Cache miss = a reward added to the channel
+                        // mid-stream: trigger the reactive refresher so the
+                        // NEXT redemption carries fresh info.
+                        if reward_title.is_none() {
+                            reward_miss_notify.notify_one();
+                        }
                         // Default-icon rewards: fall back to the channel coin
                         // (fetched anonymously via GQL by the serve layer).
                         if reward_image.is_none() {
