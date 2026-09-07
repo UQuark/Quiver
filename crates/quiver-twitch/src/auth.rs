@@ -185,13 +185,26 @@ impl<'a> DeviceFlow<'a> {
 }
 
 /// A user-scoped token with refresh + persistence, loaded from (and written
-/// back to) the on-disk OAuth store.
+/// back to) the on-disk OAuth store. Cloneable so call sites can hold a
+/// handle without keeping the parent client's lock alive.
 pub struct ChannelToken {
     http: reqwest::Client,
     client_id: String,
     client_secret: String,
     store_path: PathBuf,
     state: RwLock<Option<StoredTokens>>,
+}
+
+impl Clone for ChannelToken {
+    fn clone(&self) -> Self {
+        Self {
+            http: self.http.clone(),
+            client_id: self.client_id.clone(),
+            client_secret: self.client_secret.clone(),
+            store_path: self.store_path.clone(),
+            state: RwLock::new(self.state.read().unwrap().clone()),
+        }
+    }
 }
 
 impl ChannelToken {
@@ -254,7 +267,11 @@ impl ChannelToken {
     }
 
     /// A valid user access token, refreshing (and persisting) when stale.
+    ///
+    /// Guards are never held across `.await` (std RwLock guards are !Send);
+    /// the refresh happens between short critical sections.
     pub async fn access_token(&self) -> Result<String, HelixError> {
+        // Fast path: cached token still valid past the refresh margin.
         {
             let guard = self.state.read().unwrap();
             if let Some(store) = guard.as_ref()
@@ -264,23 +281,30 @@ impl ChannelToken {
             }
         }
 
-        let mut guard = self.state.write().unwrap();
-        let store = match guard.as_mut() {
-            Some(s) => s,
-            None => {
-                return Err(HelixError::ChannelAuthRequired(
-                    "channel oauth not configured — run `quiver-chat --auth`".to_string(),
-                ))
+        // Refresh: extract the refresh token under a short lock, drop the
+        // guard, then do the network round-trip.
+        let refresh_token = {
+            let mut guard = self.state.write().unwrap();
+            match guard.as_mut() {
+                None => {
+                    return Err(HelixError::ChannelAuthRequired(
+                        "channel oauth not configured — run `quiver-chat --auth`".to_string(),
+                    ))
+                }
+                Some(store) => {
+                    if token_is_fresh(store.expires_at) {
+                        // Another task refreshed it in the meantime.
+                        return Ok(store.access_token.clone());
+                    }
+                    if store.refresh_token.is_empty() {
+                        return Err(HelixError::ChannelAuthRequired(
+                            "refresh token missing — re-run `quiver-chat --auth`".to_string(),
+                        ));
+                    }
+                    store.refresh_token.clone()
+                }
             }
         };
-        if token_is_fresh(store.expires_at) {
-            return Ok(store.access_token.clone());
-        }
-        if store.refresh_token.is_empty() {
-            return Err(HelixError::ChannelAuthRequired(
-                "refresh token missing — re-run `quiver-chat --auth`".to_string(),
-            ));
-        }
 
         #[derive(serde::Deserialize)]
         struct RefreshResponse {
@@ -295,7 +319,7 @@ impl ChannelToken {
             .post(TOKEN_URL)
             .form(&[
                 ("grant_type", "refresh_token"),
-                ("refresh_token", &store.refresh_token),
+                ("refresh_token", &refresh_token),
                 ("client_id", &self.client_id),
                 ("client_secret", &self.client_secret),
             ])
@@ -309,14 +333,20 @@ impl ChannelToken {
             )));
         }
         let t: RefreshResponse = resp.json().await?;
-        store.access_token = t.access_token;
-        if let Some(rt) = t.refresh_token {
-            store.refresh_token = rt; // rotation: persist the fresh pair
+
+        // Store the fresh pair (rotation-safe) and persist.
+        {
+            let mut guard = self.state.write().unwrap();
+            if let Some(store) = guard.as_mut() {
+                store.access_token = t.access_token.clone();
+                if let Some(rt) = t.refresh_token {
+                    store.refresh_token = rt;
+                }
+                store.expires_at = now_epoch() + t.expires_in;
+            }
         }
-        store.expires_at = now_epoch() + t.expires_in;
-        let token = store.access_token.clone();
         self.persist().ok();
-        Ok(token)
+        Ok(t.access_token)
     }
 
     /// Persist current tokens to the store, atomically (tmp + rename).

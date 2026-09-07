@@ -469,6 +469,7 @@ const EVENT_STYLES = {
   gift_sub: { icon: "🎁", bg: "rgba(145,70,255,.18)", border: "#9146FF" },
   mystery_gift: { icon: "🎁🎁", bg: "rgba(145,70,255,.22)", border: "#9146FF" },
   raid: { icon: "⚔", bg: "rgba(255,140,0,.22)", border: "#FF8C00" },
+  redeem: { icon: "🏅", bg: "rgba(0,180,216,.22)", border: "#00B4D8" },
 };
 const EVENT_BANNER_MS = 8000;
 
@@ -496,6 +497,13 @@ function showEvent(ev) {
     case "raid":
       text = `${ev.from_display_name} raided with ${ev.viewers} viewers!`;
       break;
+    case "redeem": {
+      const reward = ev.reward_title || "a channel point reward";
+      text = ev.user_input
+        ? `${ev.display_name} redeemed ${reward}: ${ev.user_input}`
+        : `${ev.display_name} redeemed ${reward}`;
+      break;
+    }
   }
   banner.append(el("span", "event-icon", style.icon), el("span", "event-text", text));
 

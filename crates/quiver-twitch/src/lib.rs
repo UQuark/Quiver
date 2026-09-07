@@ -16,7 +16,7 @@ pub use auth::{ChannelToken, DEFAULT_SCOPES, StoredTokens};
 pub use error::TwitchError;
 pub use events::{
     Badge, ChatMessage, EmoteRef, Event, GifRef, GiftSubEvent, MessageDeleted, MysteryGiftEvent,
-    RaidEvent, ReplyParent, SubEvent,
+    RaidEvent, RedeemEvent, ReplyParent, SubEvent,
 };
 pub use helix::{HelixClient, HelixError};
 pub use source::IrcChatSource;

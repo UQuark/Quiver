@@ -11,10 +11,12 @@ tokio = { workspace = true, features = ["sync", "time"] }
 reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+chrono = "0.4"
 
 [dev-dependencies]
 tokio = { workspace = true }
 serde_json = { workspace = true }
+chrono = "0.4"
 
 [lints]
 workspace = true

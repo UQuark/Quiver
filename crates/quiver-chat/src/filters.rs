@@ -24,6 +24,7 @@ pub enum MsgKind {
     GiftSub,
     MysteryGift,
     Raid,
+    Redeem,
 }
 
 impl MsgKind {
@@ -34,6 +35,7 @@ impl MsgKind {
             "gift_sub" => Some(Self::GiftSub),
             "mystery_gift" => Some(Self::MysteryGift),
             "raid" => Some(Self::Raid),
+            "redeem" => Some(Self::Redeem),
             _ => None,
         }
     }
@@ -46,6 +48,7 @@ impl MsgKind {
             Self::GiftSub => "gift_sub",
             Self::MysteryGift => "mystery_gift",
             Self::Raid => "raid",
+            Self::Redeem => "redeem",
         }
     }
 }
@@ -197,6 +200,33 @@ impl CompiledFilters {
             }
         }
         true
+    }
+
+    /// Convenience gate for events produced OUTSIDE the engine pump (the
+    /// redemption poller, EventSub): builds a PermitCtx from scalar fields.
+    pub fn permits_event(
+        compiled: &SharedCompiled,
+        kind: MsgKind,
+        login: &str,
+        display_name: &str,
+        user_id: &str,
+        content: &str,
+    ) -> bool {
+        let guard = match compiled.read() {
+            Ok(g) => g,
+            Err(_) => return true, // fail-open, same as the pump's permitted()
+        };
+        let Some(f) = guard.as_ref() else {
+            return true;
+        };
+        f.permits(&PermitCtx {
+            kind,
+            login,
+            display_name,
+            user_id,
+            badges: &[],
+            content,
+        })
     }
 }
 

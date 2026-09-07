@@ -5,14 +5,14 @@
 //! expiry) and the widget stays a dumb renderer: every state change is
 //! announced as a wire frame so late joiners get correct snapshots.
 
-use std::collections::VecDeque;
-use std::sync::{Arc, Mutex};
+use std::collections::{HashMap, VecDeque};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 use crate::filters::MsgKind;
 use quiver_twitch::{
     Badge, ChatMessage, EmoteRef, Event, GifRef, GiftSubEvent, MessageDeleted, MysteryGiftEvent,
-    RaidEvent, SubEvent,
+    RaidEvent, RedeemEvent, SubEvent,
 };
 use serde::Serialize;
 use tracing::warn;
@@ -51,6 +51,14 @@ pub enum WireEvent {
         from_login: String,
         from_display_name: String,
         viewers: u64,
+    },
+    Redeem {
+        user_login: String,
+        display_name: String,
+        /// Resolved reward title when channel OAuth exists; None → the
+        /// widget renders a generic label.
+        reward_title: Option<String>,
+        user_input: String,
     },
 }
 
@@ -100,6 +108,19 @@ impl From<RaidEvent> for WireEvent {
             from_login: r.from_login,
             from_display_name: r.from_display_name,
             viewers: r.viewers,
+        }
+    }
+}
+
+impl From<RedeemEvent> for WireEvent {
+    fn from(r: RedeemEvent) -> Self {
+        Self::Redeem {
+            user_login: r.user_login,
+            display_name: r.display_name,
+            // Title resolution happens at emit time (Helix cache); the
+            // untyped fallback renders as "a channel point reward".
+            reward_title: None,
+            user_input: r.user_input,
         }
     }
 }
@@ -318,6 +339,37 @@ impl EngineState {
 /// Shared handle used by the server and the pump task.
 pub type SharedState = Arc<Mutex<EngineState>>;
 
+/// reward_id -> reward title, resolved via Helix when channel OAuth exists.
+/// Refreshed periodically by the serve layer; the pump only reads it.
+pub type SharedRewardTitles = Arc<RwLock<HashMap<String, String>>>;
+
+/// Shared ring buffer that suppresses duplicate redemption emissions across
+/// producers (IRC, poller, EventSub) within a 30s window, keyed by
+/// `user_login|reward_id`. Legitimate fast repeats of the same reward by the
+/// same user inside the window are coalesced — accepted tradeoff.
+#[derive(Default)]
+pub struct RedeemDeduper {
+    entries: VecDeque<(String, Instant)>,
+}
+
+impl RedeemDeduper {
+    const WINDOW: Duration = Duration::from_secs(30);
+
+    /// Returns true when this key was NOT seen in the window (and marks it).
+    pub fn check_and_mark(&mut self, key: String) -> bool {
+        let now = Instant::now();
+        self.entries
+            .retain(|(_, seen)| now.duration_since(*seen) < Self::WINDOW);
+        if self.entries.iter().any(|(k, _)| *k == key) {
+            return false;
+        }
+        self.entries.push_back((key, now));
+        true
+    }
+}
+
+pub type SharedRedeemDeduper = Arc<Mutex<RedeemDeduper>>;
+
 /// Single filter decision point for the pump. No compiled filters = pass.
 fn permitted(
     filters: &crate::filters::SharedCompiled,
@@ -362,6 +414,8 @@ pub async fn pump(
     state: SharedState,
     tx: tokio::sync::broadcast::Sender<String>,
     filters: crate::filters::SharedCompiled,
+    reward_titles: SharedRewardTitles,
+    redeem_deduper: SharedRedeemDeduper,
     source: &mut quiver_twitch::IrcChatSource,
 ) {
     let mut ticker = tokio::time::interval(Duration::from_secs(1));
@@ -442,6 +496,33 @@ pub async fn pump(
                 Some(Event::Raid(r)) => {
                     if permitted(&filters, MsgKind::Raid, &r.from_login, &r.from_display_name, "", &[], "") {
                         send_event(&tx, r);
+                    }
+                }
+                Some(Event::Redeem(r)) => {
+                    // Redemption input is user text: treat it as content for
+                    // content filters. The reward title resolves from the
+                    // shared Helix cache when channel OAuth exists; a miss
+                    // renders as the generic "channel point reward" label.
+                    if permitted(&filters, MsgKind::Redeem, &r.user_login, &r.display_name, &r.user_id, &[], &r.user_input) {
+                        // Cross-source dedupe: the poller/EventSub may have
+                        // emitted this redemption seconds ago.
+                        let key = format!("{}|{}", r.user_login, r.reward_id);
+                        let fresh = redeem_deduper
+                            .lock()
+                            .map(|mut d| d.check_and_mark(key))
+                            .unwrap_or(false);
+                        if !fresh {
+                            continue;
+                        }
+                        let reward_title = reward_titles
+                            .read()
+                            .ok()
+                            .and_then(|m| m.get(&r.reward_id).cloned());
+                        let mut wire = WireEvent::from(r);
+                        if let WireEvent::Redeem { reward_title: rt, .. } = &mut wire {
+                            *rt = reward_title;
+                        }
+                        send_event(&tx, wire);
                     }
                 }
                 Some(_) => {}

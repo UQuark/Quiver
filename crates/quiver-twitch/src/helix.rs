@@ -181,25 +181,25 @@ impl HelixClient {
         unreachable!("retry loop returns or errors on both passes")
     }
 
-    /// GET a Helix path with CHANNEL (user) auth. Retries once on 401 after
-    /// forcing a cross-tick refresh (the token refresh runs on demand).
+    /// GET a Helix path with CHANNEL (user) auth. Refreshes the token on
+    /// demand; the store guard is dropped before any await.
     async fn get_json_user<T: DeserializeOwned>(
         &self,
         path: &str,
         query: &[(&str, &str)],
     ) -> Result<T, HelixError> {
-        let token = self
-            .channel
-            .read()
-            .unwrap()
-            .as_ref()
-            .ok_or_else(|| {
-                HelixError::ChannelAuthRequired(
-                    "run `quiver-chat --auth` to enable channel-scoped calls".to_string(),
-                )
-            })?
-            .access_token()
-            .await?;
+        let channel_token = {
+            let guard = self.channel.read().unwrap();
+            match guard.as_ref() {
+                Some(t) => t.clone(),
+                None => {
+                    return Err(HelixError::ChannelAuthRequired(
+                        "run `quiver-chat --auth` to enable channel-scoped calls".to_string(),
+                    ))
+                }
+            }
+        };
+        let token = channel_token.access_token().await?;
         let resp = self
             .http
             .get(format!("{HELIX_URL}{path}"))
@@ -339,6 +339,15 @@ pub struct Redemption {
     pub reward_id: String,
     pub user_input: String,
     pub created_at: String,
+}
+
+impl Redemption {
+    /// Unix epoch seconds for `created_at`.
+    pub fn created_at_secs(&self) -> u64 {
+        chrono::DateTime::parse_from_rfc3339(&self.created_at)
+            .map(|t| t.timestamp().max(0) as u64)
+            .unwrap_or(0)
+    }
 }
 
 impl From<RawRedemption> for Redemption {
