@@ -355,6 +355,8 @@ fn spawn_feed(
                             debug!(queued = %new_channel, want = %want, "stale channel swap ignored");
                             continue 'session;
                         }
+                        // swap_channel joins FIRST and parts the OLD channel only on success,
+                        // so on join failure the old feed keeps flowing (supervisor contract).
                         // Same connection keeps flowing; resume pumping.
                         swap_channel(&source, &joined, &new_channel, &messages, &tx);
                         joined = new_channel;
@@ -371,9 +373,12 @@ fn spawn_feed(
     FeedHandle { swap_tx }
 }
 
-/// Part the old channel, join the new one, wipe history, tell clients.
+/// Join the new channel FIRST, part the old one only after success.
 /// The new login was validated before the reload was accepted, so join
-/// failures here are logged and non-fatal (old feed keeps flowing).
+/// failures here are logged and non-fatal — and the old feed MUST keep
+/// flowing, which is exactly why the part cannot happen first: parting
+/// before a failed join would leave the connection in NEITHER channel
+/// (the previous ordering contradicted this comment).
 fn swap_channel(
     source: &quiver_twitch::IrcChatSource,
     old: &str,
@@ -382,11 +387,14 @@ fn swap_channel(
     tx: &broadcast::Sender<String>,
 ) {
     let client = source.client();
-    client.part(old.to_string());
     if let Err(e) = client.join(new.to_string()) {
-        warn!(%new, %e, "join failed after channel swap");
+        warn!(%new, %e, "join failed after channel swap — staying on old channel");
         return;
     }
+    // `part` is fire-and-forget (returns `()`, queued by the library):
+    // once the join succeeds we are guaranteed to be in the new channel,
+    // even if the server processes the PART after the JOIN.
+    client.part(old.to_string());
     let cleared = messages.lock().map(|mut m| m.clear()).unwrap_or_default();
     debug!(count = cleared.len(), "history cleared on channel swap");
     let _ = tx.send(r#"{"type":"clear"}"#.to_string());
