@@ -318,6 +318,28 @@ fn pick_type_matching_variant(
     resolved.clone()
 }
 
+/// Descend through $refs and nested anyOf (untagged-enum definitions) to
+/// the first OBJECT-shaped variant (one carrying `properties`). None when
+/// the schema is not / does not contain an object shape (e.g. plain
+/// HashMaps use additionalProperties only and are unaffected).
+fn find_object_variant(
+    node: &serde_json::Value,
+    defs: Option<&serde_json::Value>,
+) -> Option<serde_json::Value> {
+    let resolved = resolve_ref(node, defs);
+    if resolved.get("properties").and_then(|p| p.as_object()).is_some() {
+        return Some(resolved.clone());
+    }
+    if let Some(any_of) = resolved.get("anyOf").and_then(|v| v.as_array()) {
+        for v in any_of {
+            if let Some(found) = find_object_variant(v, defs) {
+                return Some(found);
+            }
+        }
+    }
+    None
+}
+
 fn emit_value(
     out: &mut String,
     value: &serde_json::Value,
@@ -338,7 +360,22 @@ fn emit_value(
 
     match value {
         serde_json::Value::Object(map) => {
-            let props = schema_node.get("properties").and_then(|p| p.as_object());
+            let props = schema_node
+                .get("properties")
+                .and_then(|p| p.as_object())
+                .cloned()
+                .or_else(|| {
+                    // Untagged-enum STRUCT variant: schemars wraps the
+                    // variants in (possibly nested and/or $ref'd) anyOf, so
+                    // the top-level node has no `properties`. Descend to
+                    // the object-shaped variant — without this the struct
+                    // was emitted as a free-form map ({braces}) instead of
+                    // RON struct parens.
+                    let v = find_object_variant(schema_node, defs)?;
+                    v.get("properties")
+                        .and_then(|p| p.as_object())
+                        .cloned()
+                });
 
             if let Some(props) = props {
                 // Struct: parens + declaration-ordered fields. Fields that
@@ -350,8 +387,8 @@ fn emit_value(
                     // Pass the UNRESOLVED property node: descriptions sit
                     // next to $ref on the property itself; emit_field
                     // resolves for the value emission.
-                    let resolved_field = resolve_ref(field_schema, defs);
-                    let val = match map.get(key) {
+                    let resolved_field = resolve_ref(&field_schema, defs);
+                    let val = match map.get(&key) {
                         Some(v) => v,
                         None => {
                             if !is_nullable(resolved_field) {
@@ -363,7 +400,7 @@ fn emit_value(
                             &serde_json::Value::Null
                         }
                     };
-                    emit_field(out, key, val, field_schema, defs, indent + 1, path)?;
+                    emit_field(out, &key, val, &field_schema, defs, indent + 1, path)?;
                 }
                 push_indent(out, indent);
                 out.push(')');
