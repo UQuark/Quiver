@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::sync::{Notify, mpsc};
+use tokio::sync::{Notify, mpsc, watch};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
@@ -33,9 +33,10 @@ pub(crate) struct ReloadCtx {
     pub feed_swap: mpsc::UnboundedSender<String>,
     pub fe_watch: mpsc::UnboundedSender<Option<PathBuf>>,
     pub rebind: Arc<Notify>,
-    /// Bumped on channel swap: the reward-info/coin refresher and EventSub
-    /// re-target immediately (no idle ticker in the serve layer).
-    pub channel_changed: Arc<Notify>,
+    /// Generation bumped on channel swap: the reward-info/coin refresher
+    /// and EventSub re-target immediately (watch = multi-consumer, no
+    /// lost wakeups, unlike Notify's single permit).
+    pub channel_changed: watch::Sender<std::time::Instant>,
 }
 
 /// Watch the config's parent directory (atomic-save editors REPLACE the
@@ -400,8 +401,9 @@ async fn apply_action(ctx: &ReloadCtx, action: &Action, new_live: &LiveConfig) {
         Action::SwapChannel(channel) => {
             // Supervisor parts/joins and broadcasts {"type":"clear"}.
             let _ = ctx.feed_swap.send(channel.clone());
-            // Reward-info/coin refresher + EventSub re-target immediately.
-            ctx.channel_changed.notify_one();
+            // Reward-info/coin refresher + EventSub re-target immediately
+            // (multi-consumer watch — every consumer wakes).
+            let _ = ctx.channel_changed.send(std::time::Instant::now());
         }
         Action::RefreshBadges => match &new_live.creds {
             Some((id, secret)) => {

@@ -67,16 +67,20 @@ fn enabled_specs() -> Vec<SubSpec> {
 /// (the chat layer's message_type filters flow through here as a closure,
 /// since quiver-twitch cannot depend on quiver-chat).
 /// `deduper`: cross-source redemption dedupe — EventSub marks/deduplicates
-/// redemption ids and skips redemptions IRC already rendered moments ago.
+/// `channel_resolver`: returns the CURRENT channel login — re-read per
+/// session so a channel swap re-targets subscriptions without a restart.
+///
+/// `swap`: fired by the reload layer on channel swap — bounces the active
+/// session so the re-target happens within ~seconds. The coin icon is
+/// resolved per session via anonymous GQL against the current channel.
 pub fn spawn(
     helix: Arc<HelixClient>,
-    broadcaster_slot: Arc<std::sync::RwLock<Option<String>>>,
-    coin_slot: Arc<std::sync::RwLock<Option<String>>>,
+    channel_resolver: Arc<dyn Fn() -> Option<String> + Send + Sync>,
     tx: broadcast::Sender<String>,
     quit: tokio_util::sync::CancellationToken,
     gate: Arc<dyn Fn(&str) -> bool + Send + Sync>,
     deduper: crate::dedupe::SharedRedeemDeduper,
-    swap: Arc<Notify>,
+    mut swap: tokio::sync::watch::Receiver<std::time::Instant>,
 ) {
     tokio::spawn(async move {
         let mut backoff = Duration::from_secs(2);
@@ -84,35 +88,37 @@ pub fn spawn(
             if quit.is_cancelled() {
                 return;
             }
-            // Per-session state: broadcaster + coin read fresh from the
-            // slots, so a swap re-targets within one reconnect cycle.
-            let Some(broadcaster_id) = broadcaster_slot.read().ok().and_then(|s| s.clone()) else {
-                // Refresher hasn't populated the slot yet — wait for it
-                // (or a swap/quit).
+            // Per-session state: current channel login → broadcaster id →
+            // coin. A swap bounces the session; the next one resolves fresh.
+            let Some(channel_login) = (channel_resolver)() else {
+                // Live config lost its channel (transient) — brief wait.
                 tokio::select! {
                     _ = quit.cancelled() => return,
-                    _ = swap.notified() => {}
+                    _ = swap.changed() => {}
                     _ = tokio::time::sleep(Duration::from_millis(500)) => {}
                 }
                 continue;
             };
-            let coin = coin_slot.read().ok().and_then(|c| c.clone());
-            // Own the session inputs (cheap clones) — the spawned task must
-            // be 'static while the supervisor keeps its loop locals.
-            let session_helix = helix.clone();
-            let session_broadcaster = broadcaster_id.clone();
-            let session_tx = tx.clone();
-            let session_quit = quit.clone();
-            let session_gate = gate.clone();
-            let session_deduper = deduper.clone();
+            let Ok(broadcaster_id) = helix.user_id(&channel_login).await else {
+                tracing::warn!(channel = %channel_login, "broadcaster id lookup failed — retrying");
+                tokio::select! {
+                    _ = quit.cancelled() => return,
+                    _ = swap.changed() => {}
+                    _ = tokio::time::sleep(backoff) => {}
+                }
+                backoff = (backoff * 2).min(Duration::from_secs(60));
+                continue;
+            };
+            let coin = helix.coin_icon_url(&channel_login).await;
             let mut session = tokio::spawn(run_session(
-                session_helix,
-                session_broadcaster,
-                session_tx,
-                session_quit,
-                session_gate,
-                session_deduper,
+                helix.clone(),
+                broadcaster_id,
+                tx.clone(),
+                quit.clone(),
+                gate.clone(),
+                deduper.clone(),
                 coin,
+                swap.clone(),
             ));
             tokio::select! {
                 res = &mut session => match res {
@@ -135,7 +141,7 @@ pub fn spawn(
                     session.abort();
                     return;
                 }
-                _ = swap.notified() => {
+                _ = swap.changed() => {
                     // Channel swap: bounce the socket so the next session
                     // subscribes against the new broadcaster.
                     session.abort();
@@ -162,6 +168,7 @@ async fn run_session(
     gate: Arc<dyn Fn(&str) -> bool + Send + Sync>,
     deduper: crate::dedupe::SharedRedeemDeduper,
     coin_icon: Option<String>,
+    mut swap: tokio::sync::watch::Receiver<std::time::Instant>,
 ) -> SessionEnd {
     let (ws, _resp) = match tokio_tungstenite::connect_async(EVENTSUB_WS_URL).await {
         Ok(x) => x,
@@ -249,9 +256,16 @@ async fn run_session(
     }
 
     // Notification loop.
+    let mut swap = swap;
     loop {
         tokio::select! {
             _ = quit.cancelled() => return SessionEnd::Quit,
+            _ = swap.changed() => {
+                // Channel swap: end this session; the supervisor reconnects
+                // against the new channel immediately.
+                info!("eventsub session bounces for channel swap");
+                return SessionEnd::Dropped;
+            }
             msg = read.next() => {
                 match msg {
                     // Transport-level Ping/Pong: skip (tungstenite answers

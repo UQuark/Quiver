@@ -164,11 +164,10 @@ let css_cache_dir = cfg
     //   also retargets EventSub via broadcaster_slot)
     // - miss_gen: bumped by pump/poller on a reward-cache miss (new
     //   reward mid-stream) — self-healing without idle polling
-    // - broadcaster_slot: current broadcaster id; EventSub reads it per
-    //   session so a swap re-targets subscriptions.
-    let swap_gen = Arc::new(Notify::new());
+    //   (watch::Sender/Receiver: multi-consumer, no lost wakeups, no
+    //   permit stealing — the Notify variant had exactly that bug)
+    let (swap_tx, swap_rx) = tokio::sync::watch::channel(std::time::Instant::now());
     let miss_gen = Arc::new(Notify::new());
-    let broadcaster_slot: Arc<RwLock<Option<String>>> = Arc::new(RwLock::new(None));
     if helix.has_channel_auth() {
         info!(
             user = ?helix.channel_login(),
@@ -180,8 +179,7 @@ let css_cache_dir = cfg
         let live_for_titles = live.clone();
         let quit = quit.clone();
         let coin_for_refresh = coin_icon.clone();
-        let broadcaster_for_refresh = broadcaster_slot.clone();
-        let swap_for_refresh = swap_gen.clone();
+        let mut swap_for_refresh = swap_rx.clone();
         let miss_for_refresh = miss_gen.clone();
         tokio::spawn(async move {
             // Refresh once per trigger: immediately on boot, on channel
@@ -194,7 +192,6 @@ let css_cache_dir = cfg
                 live: &SharedLive,
                 coin: &Arc<RwLock<Option<String>>>,
                 reward_titles: &engine::SharedRewardTitles,
-                broadcaster_slot: &Arc<RwLock<Option<String>>>,
             ) {
                 let broadcaster = match live.read().map(|l| l.channel.clone()) {
                     Ok(ch) => ch,
@@ -212,9 +209,6 @@ let css_cache_dir = cfg
                 }
                 match crate::serve::channel_broadcaster_id(helix, &broadcaster).await {
                     Some(bid) => {
-                        if let Ok(mut slot) = broadcaster_slot.write() {
-                            *slot = Some(bid.clone());
-                        }
                         match helix.custom_reward_titles(&bid).await {
                             Ok(map) => {
                                 let with_icon =
@@ -235,14 +229,16 @@ let css_cache_dir = cfg
                 }
             }
 
-            refresh(&helix, &live_for_titles, &coin_for_refresh, &reward_titles, &broadcaster_for_refresh).await;
+            refresh(&helix, &live_for_titles, &coin_for_refresh, &reward_titles).await;
             last_run = Some(tokio::time::Instant::now());
+            let mut swap_seen = *swap_for_refresh.borrow();
             loop {
-                let swap_fut = swap_for_refresh.notified();
+                let swap_fut = swap_for_refresh.changed();
                 let miss_fut = miss_for_refresh.notified();
                 tokio::select! {
                     _ = quit.cancelled() => return,
                     _ = swap_fut => {
+                        swap_seen = *swap_for_refresh.borrow_and_update();
                         info!("channel swapped — refreshing reward info + coin");
                     }
                     _ = miss_fut => {
@@ -254,7 +250,7 @@ let css_cache_dir = cfg
                         debug!("reward cache miss — refreshing reward info");
                     }
                 }
-                refresh(&helix, &live_for_titles, &coin_for_refresh, &reward_titles, &broadcaster_for_refresh).await;
+                refresh(&helix, &live_for_titles, &coin_for_refresh, &reward_titles).await;
                 last_run = Some(tokio::time::Instant::now());
             }
         });
@@ -410,9 +406,11 @@ let css_cache_dir = cfg
         let tx_for_es = tx.clone();
         let filters_for_es = filters.clone();
         let deduper_for_es = redeem_deduper.clone();
-        let broadcaster_for_es = broadcaster_slot.clone();
-        let coin_slot_for_es = coin_icon.clone();
-        let swap_for_es = swap_gen.clone();
+        let swap_for_es = swap_rx.clone();
+        // Current channel login resolver for EventSub (reads live per call).
+        let live_for_es = live.clone();
+        let channel_resolver: Arc<dyn Fn() -> Option<String> + Send + Sync> =
+            Arc::new(move || live_for_es.read().ok().and_then(|l| Some(l.channel.clone())));
         let gate = Arc::new(move |kind: &str| {
             let Some(kind_enum) = crate::filters::MsgKind::parse(kind) else {
                 return false;
@@ -427,14 +425,13 @@ let css_cache_dir = cfg
             )
         });
         tokio::spawn(async move {
-            // EventSub re-targets on channel swap: the client reads the
-            // broadcaster + coin from shared slots (kept fresh by the
-            // reactive refresher) per session, and bounces its socket when a
-            // swap lands mid-stream.
+            // EventSub re-targets on channel swap: per session it resolves
+            // the CURRENT channel (login via the resolver closure),
+            // broadcaster id, and coin — then bounces its socket when a swap
+            // lands mid-stream.
             quiver_twitch::eventsub::spawn(
                 helix,
-                broadcaster_for_es,
-                coin_slot_for_es,
+                channel_resolver,
                 tx_for_es,
                 quit,
                 gate,
@@ -456,7 +453,7 @@ let css_cache_dir = cfg
         emotes: emotes.clone(),
         filters: filters.clone(),
         rebind: rebind.clone(),
-        channel_changed: swap_gen.clone(),
+        channel_changed: swap_tx,
     };
     crate::reload::spawn_watcher(config_path, ctx, quit.clone());
 
