@@ -730,6 +730,7 @@ pub(crate) fn meta_value(
             "max_messages": live.theme.max_messages,
             "overflow_mode": live.theme.overflow_mode,
             "event_banner_secs": live.theme.event_banner_secs,
+            "redeem_icon_url": live.theme.redeem_icon_url,
         },
         "badges": badges,
         "custom_css": custom_css,
@@ -1244,6 +1245,7 @@ mod tests {
                 role_css: role,
                 overflow_mode: crate::config::OverflowMode::Prune,
                 event_banner_secs: 8,
+                redeem_icon_url: None,
             },
             emotes: EmotesConfig::default(),
         }

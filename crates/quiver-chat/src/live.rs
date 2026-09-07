@@ -159,6 +159,7 @@ mod tests {
                 role_css: None,
                 overflow_mode: crate::config::OverflowMode::Prune,
                 event_banner_secs: 8,
+                redeem_icon_url: None,
             },
             emotes: EmotesConfig::default(),
             filters: crate::config::FiltersConfig::default(),
