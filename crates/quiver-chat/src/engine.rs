@@ -348,32 +348,11 @@ pub type SharedState = Arc<Mutex<EngineState>>;
 /// pump only reads it.
 pub type SharedRewardTitles = Arc<RwLock<HashMap<String, RewardInfo>>>;
 
-/// Shared ring buffer that suppresses duplicate redemption emissions across
-/// producers (IRC, poller, EventSub) within a 30s window, keyed by
-/// `user_login|reward_id`. Legitimate fast repeats of the same reward by the
-/// same user inside the window are coalesced — accepted tradeoff.
-#[derive(Default)]
-pub struct RedeemDeduper {
-    entries: VecDeque<(String, Instant)>,
-}
-
-impl RedeemDeduper {
-    const WINDOW: Duration = Duration::from_secs(30);
-
-    /// Returns true when this key was NOT seen in the window (and marks it).
-    pub fn check_and_mark(&mut self, key: String) -> bool {
-        let now = Instant::now();
-        self.entries
-            .retain(|(_, seen)| now.duration_since(*seen) < Self::WINDOW);
-        if self.entries.iter().any(|(k, _)| *k == key) {
-            return false;
-        }
-        self.entries.push_back((key, now));
-        true
-    }
-}
-
-pub type SharedRedeemDeduper = Arc<Mutex<RedeemDeduper>>;
+/// Cross-source redemption deduplication lives in quiver-twitch
+/// ([`quiver_twitch::dedupe`]) so the EventSub client can share the same
+/// ring. The IRC path NEVER suppresses its emissions — every redemption
+/// message that arrives is its own redemption and must render.
+pub type SharedRedeemDeduper = quiver_twitch::dedupe::SharedRedeemDeduper;
 
 /// Single filter decision point for the pump. No compiled filters = pass.
 fn permitted(
@@ -509,16 +488,13 @@ pub async fn pump(
                     // shared Helix cache when channel OAuth exists; a miss
                     // renders as the generic "channel point reward" label.
                     if permitted(&filters, MsgKind::Redeem, &r.user_login, &r.display_name, &r.user_id, &[], &r.user_input) {
-                        // Cross-source dedupe: the poller/EventSub may have
-                        // emitted this redemption seconds ago.
-                        let key = format!("{}|{}", r.user_login, r.reward_id);
-                        let fresh = redeem_deduper
+                        // IRC ALWAYS renders a redemption — each message is
+                        // its own redemption (rapid repeats included). We
+                        // only MARK it so the poller/EventSub don't ALSO
+                        // deliver the same redemption moments later.
+                        let _ = redeem_deduper
                             .lock()
-                            .map(|mut d| d.check_and_mark(key))
-                            .unwrap_or(false);
-                        if !fresh {
-                            continue;
-                        }
+                            .map(|mut d| d.mark_irc(&r.user_login, &r.user_id, &r.reward_id));
                         let (reward_title, reward_image) = reward_titles
                             .read()
                             .ok()

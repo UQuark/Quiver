@@ -473,7 +473,7 @@ impl Validate for ChatConfig {
                         message: format!(
                             "unknown message kind {item:?} \u{2014} expected one of: \
                              message, sub, gift_sub, mystery_gift, raid, redeem,
-                             hype_train, prediction, poll"
+                             hype_train, prediction, poll, follow"
                         ),
                     });
                 }

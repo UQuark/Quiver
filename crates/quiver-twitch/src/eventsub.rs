@@ -41,8 +41,8 @@ pub const DEFAULT_SUBSCRIPTIONS: &[SubSpec] = &[
     SubSpec { type_name: "channel.prediction.lock", version: "1", scope: "channel:read:predictions", cost: 1 },
     SubSpec { type_name: "channel.prediction.end", version: "1", scope: "channel:read:predictions", cost: 1 },
     SubSpec { type_name: "channel.poll.begin", version: "1", scope: "channel:read:polls", cost: 1 },
-    SubSpec { type_name: "channel.poll.lock", version: "1", scope: "channel:read:polls", cost: 1 },
     SubSpec { type_name: "channel.poll.end", version: "1", scope: "channel:read:polls", cost: 1 },
+    SubSpec { type_name: "channel.follow", version: "2", scope: "moderator:read:followers", cost: 1 },
 ];
 
 fn enabled_specs() -> Vec<SubSpec> {
@@ -56,12 +56,15 @@ fn enabled_specs() -> Vec<SubSpec> {
 /// `gate`: called with the mapped event `kind` — false suppresses the frame
 /// (the chat layer's message_type filters flow through here as a closure,
 /// since quiver-twitch cannot depend on quiver-chat).
+/// `deduper`: cross-source redemption dedupe — EventSub marks/deduplicates
+/// redemption ids and skips redemptions IRC already rendered moments ago.
 pub fn spawn(
     helix: Arc<HelixClient>,
     broadcaster_id: String,
     tx: broadcast::Sender<String>,
     quit: tokio_util::sync::CancellationToken,
     gate: Arc<dyn Fn(&str) -> bool + Send + Sync>,
+    deduper: crate::dedupe::SharedRedeemDeduper,
 ) {
     tokio::spawn(async move {
         let mut backoff = Duration::from_secs(2);
@@ -69,7 +72,7 @@ pub fn spawn(
             if quit.is_cancelled() {
                 return;
             }
-            match run_session(&helix, &broadcaster_id, &tx, &quit, &gate).await {
+            match run_session(&helix, &broadcaster_id, &tx, &quit, &gate, &deduper).await {
                 SessionEnd::Quit => return,
                 SessionEnd::Reconnect(url) => {
                     // Twitch asks us to move to a specific socket; reconnect
@@ -103,6 +106,7 @@ async fn run_session(
     tx: &broadcast::Sender<String>,
     quit: &tokio_util::sync::CancellationToken,
     gate: &Arc<dyn Fn(&str) -> bool + Send + Sync>,
+    deduper: &crate::dedupe::SharedRedeemDeduper,
 ) -> SessionEnd {
     let (ws, _resp) = match tokio_tungstenite::connect_async(EVENTSUB_WS_URL).await {
         Ok(x) => x,
@@ -113,23 +117,41 @@ async fn run_session(
     };
     let (_write, mut read) = ws.split();
 
-    // First message MUST be session_welcome.
+    // First message MUST be session_welcome — but Twitch sends a protocol
+    // PING frame FIRST on some networks (observed live): non-Text frames
+    // are skipped, not fatal.
     let session_id = loop {
-        let Some(Ok(WsMessage::Text(text))) = read.next().await else {
-            return SessionEnd::Dropped;
-        };
-        let v: serde_json::Value = match serde_json::from_str(&text) {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-        match v["metadata"]["message_type"].as_str() {
-            Some("session_welcome") => {
-                let id = v["payload"]["session"]["id"].as_str().unwrap_or_default().to_string();
-                tracing::info!(session = %id, "eventsub session welcome");
-                break id;
+        match read.next().await {
+            Some(Ok(WsMessage::Text(text))) => {
+                let v: serde_json::Value = match serde_json::from_str(&text) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+                match v["metadata"]["message_type"].as_str() {
+                    Some("session_welcome") => {
+                        let id = v["payload"]["session"]["id"]
+                            .as_str()
+                            .unwrap_or_default()
+                            .to_string();
+                        tracing::info!(session = %id, "eventsub session welcome");
+                        break id;
+                    }
+                    Some(other) => {
+                        tracing::debug!(t = other, "eventsub pre-welcome frame ignored")
+                    }
+                    None => {}
+                }
             }
-            Some(other) => tracing::debug!(t = other, "eventsub pre-welcome frame ignored"),
-            None => {}
+            // Transport-level Ping/Pong frames (observed: a bare PING
+            // arrives BEFORE session_welcome) — skip, keep reading.
+            Some(Ok(WsMessage::Ping(_) | WsMessage::Pong(_))) => continue,
+            other => {
+                tracing::warn!(
+                    frame = ?other.map(|m| format!("{m:?}")).unwrap_or_default(),
+                    "eventsub closed before session_welcome — dropping"
+                );
+                return SessionEnd::Dropped;
+            }
         }
     };
 
@@ -166,13 +188,15 @@ async fn run_session(
         tokio::select! {
             _ = quit.cancelled() => return SessionEnd::Quit,
             msg = read.next() => {
-                let Some(Ok(WsMessage::Text(text))) = msg else {
-                    return SessionEnd::Dropped;
-                };
-                let v: serde_json::Value = match serde_json::from_str(&text) {
-                    Ok(v) => v,
-                    Err(_) => continue,
-                };
+                match msg {
+                    // Transport-level Ping/Pong: skip (tungstenite answers
+                    // pings at the protocol layer automatically).
+                    Some(Ok(WsMessage::Ping(_) | WsMessage::Pong(_))) => {}
+                    Some(Ok(WsMessage::Text(text))) => {
+                        let v: serde_json::Value = match serde_json::from_str(&text) {
+                            Ok(v) => v,
+                            Err(_) => continue,
+                        };
                 let message_type = v["metadata"]["message_type"].as_str().unwrap_or("");
                 match message_type {
                     "notification" => {
@@ -180,7 +204,31 @@ async fn run_session(
                         if let Some(frame) = map_event(sub_type, &v["payload"]["event"])
                             && gate(frame["event"]["kind"].as_str().unwrap_or(""))
                         {
-                            let _ = tx.send(frame.to_string());
+                            // Redeem frames dedupe cross-source (redemption
+                            // id vs the poller; IRC-covered (user, reward)
+                            // skips). Other kinds pass through.
+                            let redeem = &v["payload"]["event"];
+                            let already_delivered = deduper
+                                .lock()
+                                .map(|mut d| {
+                                    if sub_type
+                                        == "channel.channel_points_custom_reward_redemption.add"
+                                    {
+                                        let id = redeem["id"].as_str().unwrap_or_default();
+                                        !d.is_new_redemption_id(id)
+                                            || d.irc_already_rendered(
+                                                redeem["user_login"].as_str().unwrap_or_default(),
+                                                redeem["user_id"].as_str().unwrap_or_default(),
+                                                redeem["reward"]["id"].as_str().unwrap_or_default(),
+                                            )
+                                    } else {
+                                        false
+                                    }
+                                })
+                                .unwrap_or(false);
+                            if !already_delivered {
+                                let _ = tx.send(frame.to_string());
+                            }
                         }
                     }
                     "session_reconnect" => {
@@ -192,6 +240,15 @@ async fn run_session(
                         tracing::warn!("eventsub subscription revoked");
                     }
                     _ => {}
+                }
+                    }
+                    other => {
+                        tracing::warn!(
+                            frame = ?other.map(|m| format!("{m:?}")).unwrap_or_default(),
+                            "eventsub socket closed mid-session"
+                        );
+                        return SessionEnd::Dropped;
+                    }
                 }
             }
         }
@@ -211,8 +268,8 @@ fn map_event(sub_type: &str, ev: &serde_json::Value) -> Option<serde_json::Value
         "channel.prediction.lock" => return prediction("lock", ev),
         "channel.prediction.end" => return prediction("end", ev),
         "channel.poll.begin" => return poll("begin", ev),
-        "channel.poll.lock" => return poll("lock", ev),
         "channel.poll.end" => return poll("end", ev),
+        "channel.follow" => "follow",
         _ => return None,
     };
 

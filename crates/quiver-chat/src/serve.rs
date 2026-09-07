@@ -153,7 +153,8 @@ let css_cache_dir = cfg
         .with_channel_auth(),
     );
     let reward_titles: engine::SharedRewardTitles = Arc::new(RwLock::new(HashMap::new()));
-    let redeem_deduper: engine::SharedRedeemDeduper = Arc::new(Mutex::new(engine::RedeemDeduper::default()));
+    let redeem_deduper: engine::SharedRedeemDeduper =
+        Arc::new(std::sync::Mutex::new(quiver_twitch::RedeemDeduper::default()));
     if helix.has_channel_auth() {
         info!(
             user = ?helix.channel_login(),
@@ -247,12 +248,21 @@ let css_cache_dir = cfg
                             if age > 120 {
                                 continue;
                             }
-                            let key = format!("{}|{}", r.user_login, r.reward_id);
-                            let fresh = deduper_for_poll
+                            // Unique-redemption-id gate (vs EventSub) and the
+                            // IRC-coverage check: if IRC just rendered this
+                            // (user, reward), the poller skips.
+                            let delivered = deduper_for_poll
                                 .lock()
-                                .map(|mut d| d.check_and_mark(key))
-                                .unwrap_or(false);
-                            if !fresh {
+                                .map(|mut d| {
+                                    d.is_new_redemption_id(&r.id)
+                                        && !d.irc_already_rendered(
+                                            &r.user_login,
+                                            &r.user_id,
+                                            &r.reward_id,
+                                        )
+                                })
+                                .unwrap_or(true);
+                            if !delivered {
                                 continue;
                             }
                             let info = reward_titles
@@ -321,6 +331,7 @@ let css_cache_dir = cfg
         let quit = quit.clone();
         let tx_for_es = tx.clone();
         let filters_for_es = filters.clone();
+        let deduper_for_es = redeem_deduper.clone();
         let gate = Arc::new(move |kind: &str| {
             let Some(kind_enum) = crate::filters::MsgKind::parse(kind) else {
                 return false;
@@ -340,7 +351,7 @@ let css_cache_dir = cfg
             let Some(bid) = crate::serve::channel_broadcaster_id(&helix, &live_for_es.read().map(|l| l.channel.clone()).unwrap_or_default()).await else {
                 return;
             };
-            quiver_twitch::eventsub::spawn(helix, bid, tx_for_es, quit, gate);
+            quiver_twitch::eventsub::spawn(helix, bid, tx_for_es, quit, gate, deduper_for_es);
         });
     }
 

@@ -476,6 +476,7 @@ const EVENT_STYLES = {
   hype_train: { icon: "🚂", bg: "rgba(255,0,110,.22)", border: "#FF006E" },
   prediction: { icon: "📊", bg: "rgba(0,120,255,.18)", border: "#0078FF" },
   poll: { icon: "🗳️", bg: "rgba(0,200,120,.18)", border: "#00C878" },
+  follow: { icon: "➕", bg: "rgba(0,255,180,.16)", border: "#00FFB4" },
 };
 let eventBannerMs = 8000;
 
@@ -529,6 +530,9 @@ function showEvent(ev) {
       text = ev.phase === "end"
         ? `Poll ended: ${ev.title}`
         : `${ev.phase === "lock" ? "Poll locked" : "Poll started"}: ${ev.title}`;
+      break;
+    case "follow":
+      text = `${ev.display_name} just followed!`;
       break;
   }
   // Icon: redeems (and any event carrying a reward image) show the REAL
