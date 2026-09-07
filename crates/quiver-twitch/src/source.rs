@@ -11,8 +11,8 @@ use twitch_irc::{ClientConfig, SecureTCPTransport, TwitchIRCClient};
 
 use crate::error::TwitchError;
 use crate::events::{
-    Badge, ChatMessage, EmoteRef, Event, GifRef, GiftSubEvent, MessageDeleted, MysteryGiftEvent,
-    RaidEvent, SubEvent,
+    Badge, ChatCleared, ChatMessage, EmoteRef, Event, GifRef, GiftSubEvent, MessageDeleted,
+    MysteryGiftEvent, RaidEvent, SubEvent,
 };
 
 type Client = TwitchIRCClient<SecureTCPTransport, StaticLoginCredentials>;
@@ -58,6 +58,7 @@ impl IrcChatSource {
                 ServerMessage::Privmsg(pm) => return Some(Event::ChatMessage(map_privmsg(pm))),
                 ServerMessage::ClearMsg(cm) => {
                     return Some(Event::MessageDeleted(MessageDeleted {
+                        channel_login: cm.channel_login,
                         message_id: cm.message_id,
                         sender_login: cm.sender_login,
                     }));
@@ -66,7 +67,9 @@ impl IrcChatSource {
                     // Only a WIDE clear empties the whole chat — bans/timeouts
                     // arrive as per-message CLEARMSG deletions instead.
                     if let twitch_irc::message::ClearChatAction::ChatCleared = cc.action {
-                        return Some(Event::ChatCleared);
+                        return Some(Event::ChatCleared(ChatCleared {
+                            channel_login: cc.channel_login,
+                        }));
                     }
                 }
                 ServerMessage::UserNotice(un) => return Some(map_user_notice(un)),
@@ -486,9 +489,11 @@ mod tests {
         match ServerMessage::try_from(irc).expect("parses as ServerMessage") {
             ServerMessage::ClearMsg(cm) => {
                 let ev = crate::events::MessageDeleted {
+                    channel_login: cm.channel_login,
                     message_id: cm.message_id,
                     sender_login: cm.sender_login,
                 };
+                assert_eq!(ev.channel_login, "likh_tar");
                 assert_eq!(ev.message_id, "abc-123");
                 assert_eq!(ev.sender_login, "offender");
             }

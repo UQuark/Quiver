@@ -405,16 +405,30 @@ pub async fn pump(
                         send_event(&tx, m);
                     }
                 }
-                Some(Event::MessageDeleted(MessageDeleted { message_id, .. })) => {
+                Some(Event::MessageDeleted(msg)) => {
+                    // Straggler guard, same as ChatMessage: an in-flight
+                    // delete from a swapped-away channel must not mutate the
+                    // new channel's state.
+                    let expected_channel = live.read().map(|l| l.channel.clone()).unwrap_or_default();
+                    if msg.channel_login != expected_channel {
+                        continue;
+                    }
                     // Drop from history so future snapshots exclude it, and
                     // announce so connected clients hide it immediately.
                     if let Ok(mut st) = state.lock() {
-                        st.remove_by_id(&message_id);
+                        st.remove_by_id(&msg.message_id);
                     }
-                    let frame = serde_json::json!({ "type": "delete", "id": message_id });
+                    let frame = serde_json::json!({ "type": "delete", "id": msg.message_id });
                     let _ = tx.send(frame.to_string());
                 }
-                Some(Event::ChatCleared) => {
+                Some(Event::ChatCleared(cleared)) => {
+                    // Straggler guard: a stale in-flight CLEARCHAT from the
+                    // parted channel would wipe the new channel's history and
+                    // tell every client to blank the widget. Drop it.
+                    let expected_channel = live.read().map(|l| l.channel.clone()).unwrap_or_default();
+                    if cleared.channel_login != expected_channel {
+                        continue;
+                    }
                     // Whole chat cleared by a moderator: empty history and
                     // tell clients to wipe — same wire shape as a channel
                     // swap, which the widget already handles.
