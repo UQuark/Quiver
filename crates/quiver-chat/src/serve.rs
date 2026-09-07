@@ -155,6 +155,10 @@ let css_cache_dir = cfg
     let reward_titles: engine::SharedRewardTitles = Arc::new(RwLock::new(HashMap::new()));
     let redeem_deduper: engine::SharedRedeemDeduper =
         Arc::new(std::sync::Mutex::new(quiver_twitch::RedeemDeduper::default()));
+    // Channel coin icon (GQL, anonymous): what Twitch shows for rewards
+    // without a custom uploaded icon. None = fetch failed/unresolved —
+    // the widget falls back to its SVG coin.
+    let coin_icon: Arc<RwLock<Option<String>>> = Arc::new(RwLock::new(None));
     if helix.has_channel_auth() {
         info!(
             user = ?helix.channel_login(),
@@ -165,6 +169,7 @@ let css_cache_dir = cfg
         let reward_titles = reward_titles.clone();
         let live_for_titles = live.clone();
         let quit = quit.clone();
+        let coin_for_refresh = coin_icon.clone();
         tokio::spawn(async move {
             let mut ticker = tokio::time::interval(Duration::from_secs(600));
             ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -176,6 +181,16 @@ let css_cache_dir = cfg
                             Ok(ch) => ch,
                             Err(_) => continue,
                         };
+                        // Channel coin (anonymous GQL) — what Twitch shows
+                        // for default-icon rewards on this channel.
+                        match helix.coin_icon_url(&broadcaster).await {
+                            Some(url) => {
+                                if let Ok(mut c) = coin_for_refresh.write() {
+                                    *c = Some(url);
+                                }
+                            }
+                            None => warn!("coin icon lookup failed — keeping previous"),
+                        }
                         match crate::serve::channel_broadcaster_id(&helix, &broadcaster).await {
                             Some(bid) => match helix.custom_reward_titles(&bid).await {
                                 Ok(map) => {
@@ -229,6 +244,7 @@ let css_cache_dir = cfg
         let tx_for_poll = tx.clone();
         let filters_for_poll = filters.clone();
         let deduper_for_poll = redeem_deduper.clone();
+        let coin_for_poll = coin_icon.clone();
         tokio::spawn(async move {
             let mut ticker = tokio::time::interval(Duration::from_secs(10));
             ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -275,9 +291,13 @@ let css_cache_dir = cfg
                                 .read()
                                 .ok()
                                 .and_then(|m| m.get(&r.reward_id).cloned());
-                            let (title, image) = info
+                            let (title, mut image) = info
                                 .map(|i| (Some(i.title), i.image_url))
                                 .unwrap_or((None, None));
+                            // Default-icon rewards: channel coin fallback.
+                            if image.is_none() {
+                                image = coin_for_poll.read().ok().and_then(|c| c.clone());
+                            }
                             if !crate::filters::CompiledFilters::permits_event(
                                 &filters_for_poll,
                                 crate::filters::MsgKind::Redeem,
@@ -314,6 +334,7 @@ let css_cache_dir = cfg
         tx.clone(),
         filters.clone(),
         reward_titles.clone(),
+        coin_icon.clone(),
         redeem_deduper.clone(),
     );
 
@@ -338,6 +359,7 @@ let css_cache_dir = cfg
         let tx_for_es = tx.clone();
         let filters_for_es = filters.clone();
         let deduper_for_es = redeem_deduper.clone();
+        let coin_for_es = coin_icon.read().ok().and_then(|c| c.clone());
         let gate = Arc::new(move |kind: &str| {
             let Some(kind_enum) = crate::filters::MsgKind::parse(kind) else {
                 return false;
@@ -357,7 +379,7 @@ let css_cache_dir = cfg
             let Some(bid) = crate::serve::channel_broadcaster_id(&helix, &live_for_es.read().map(|l| l.channel.clone()).unwrap_or_default()).await else {
                 return;
             };
-            quiver_twitch::eventsub::spawn(helix, bid, tx_for_es, quit, gate, deduper_for_es);
+            quiver_twitch::eventsub::spawn(helix, bid, tx_for_es, quit, gate, deduper_for_es, coin_for_es);
         });
     }
 
@@ -484,6 +506,7 @@ fn spawn_feed(
     tx: broadcast::Sender<String>,
     filters: crate::filters::SharedCompiled,
     reward_titles: engine::SharedRewardTitles,
+    coin_icon: Arc<RwLock<Option<String>>>,
     redeem_deduper: engine::SharedRedeemDeduper,
 ) -> FeedHandle {
     let (swap_tx, swap_rx) = mpsc::unbounded_channel::<String>();
@@ -497,6 +520,7 @@ fn spawn_feed(
                 tx.clone(),
                 filters.clone(),
                 reward_titles.clone(),
+                coin_icon.clone(),
                 redeem_deduper.clone(),
                 swap_rx.clone(),
             ));
@@ -529,6 +553,7 @@ async fn feed_session(
     tx: broadcast::Sender<String>,
     filters: crate::filters::SharedCompiled,
     reward_titles: engine::SharedRewardTitles,
+    coin_icon: Arc<RwLock<Option<String>>>,
     redeem_deduper: engine::SharedRedeemDeduper,
     swap_rx: Arc<tokio::sync::Mutex<mpsc::UnboundedReceiver<String>>>,
 ) {
@@ -569,6 +594,7 @@ async fn feed_session(
                     tx.clone(),
                     filters.clone(),
                     reward_titles.clone(),
+                    coin_icon.clone(),
                     redeem_deduper.clone(),
                     &mut source
                 ));
@@ -730,7 +756,6 @@ pub(crate) fn meta_value(
             "max_messages": live.theme.max_messages,
             "overflow_mode": live.theme.overflow_mode,
             "event_banner_secs": live.theme.event_banner_secs,
-            "redeem_icon_url": live.theme.redeem_icon_url,
         },
         "badges": badges,
         "custom_css": custom_css,
@@ -1245,7 +1270,6 @@ mod tests {
                 role_css: role,
                 overflow_mode: crate::config::OverflowMode::Prune,
                 event_banner_secs: 8,
-                redeem_icon_url: None,
             },
             emotes: EmotesConfig::default(),
         }

@@ -197,14 +197,6 @@ pub struct ThemeConfig {
     /// they are scrolled away by later messages (no auto-dismiss).
     #[serde(default = "default_event_banner_secs")]
     pub event_banner_secs: u64,
-    /// URL of this channel's channel-points coin icon, used on redeem
-    /// banners for rewards that use Twitch's default coin (rewards with a
-    /// custom icon carry their own image automatically). Twitch's web
-    /// client loads it from
-    /// `https://static-cdn.jtvnw.net/channel-points-icons/<broadcaster_id>/<uuid>/icon-2.png`
-    /// — grab yours from the browser network tab during a redemption.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub redeem_icon_url: Option<String>,
 }
 
 fn default_event_banner_secs() -> u64 {
@@ -253,7 +245,6 @@ impl Default for ThemeConfig {
             role_css: None,
             overflow_mode: OverflowMode::Prune,
             event_banner_secs: default_event_banner_secs(),
-            redeem_icon_url: None,
         }
     }
 }

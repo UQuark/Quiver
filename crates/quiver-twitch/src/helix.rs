@@ -11,6 +11,10 @@ use serde::de::DeserializeOwned;
 
 const TOKEN_URL: &str = "https://id.twitch.tv/oauth2/token";
 const HELIX_URL: &str = "https://api.twitch.tv/helix";
+/// The public web-client id required by gql.twitch.tv (verified: Helix
+/// client-ids are rejected there with "Client-ID header is invalid").
+const GQL_WEB_CLIENT_ID: &str = "kimne78kx3ncx6brgo4mv6wki5h1ko";
+const GQL_URL: &str = "https://gql.twitch.tv/gql";
 /// Refresh margin: treat tokens expiring within this window as expired.
 const TOKEN_EXPIRY_MARGIN: Duration = Duration::from_secs(60);
 
@@ -378,9 +382,9 @@ impl HelixClient {
         broadcaster_id: &str,
     ) -> Result<Vec<Redemption>, HelixError> {
         #[derive(serde::Deserialize)]
-    struct RedemptionsResponse {
-        data: Vec<RawRedemption>,
-    }
+        struct RedemptionsResponse {
+            data: Vec<RawRedemption>,
+        }
 
         let parsed: RedemptionsResponse = self
             .get_json_user(
@@ -390,6 +394,55 @@ impl HelixClient {
             .await?;
         Ok(parsed.data.into_iter().map(Into::into).collect())
     }
+
+    /// The channel's channel-points coin icon URL — the custom coin when the
+    /// streamer uploaded one, else Twitch's global default orb. Anonymous
+    /// GQL (no OAuth; web Client-Id required — Helix client-ids are
+    /// rejected there). `login_or_id` accepts the channel login or numeric
+    /// broadcaster id.
+    ///
+    /// The coin is per-channel custom art NOT exposed by any Helix endpoint;
+    /// GQL's `user.channel.communityPointsSettings` is the only source.
+    pub async fn coin_icon_url(&self, login_or_id: &str) -> Option<String> {
+        let field = if login_or_id.chars().all(|c| c.is_ascii_digit()) {
+            format!(r#"id:"{login_or_id}""#)
+        } else {
+            format!(r#"login:"{login_or_id}""#)
+        };
+        let query = format!(
+            r#"{{user({field}){{channel{{communityPointsSettings{{image{{url2x}} defaultImage{{url2x}}}}}}}}}}"#
+        );
+        let body = serde_json::json!({ "query": query });
+
+        let resp = self
+            .http
+            .post(GQL_URL)
+            .header("Client-Id", GQL_WEB_CLIENT_ID)
+            .json(&body)
+            .send()
+            .await
+            .ok()?;
+        if !resp.status().is_success() {
+            tracing::warn!(status = %resp.status(), "gql coin lookup failed");
+            return None;
+        }
+        let v: serde_json::Value = resp.json().await.ok()?;
+        parse_coin_icon(&v)
+    }
+}
+
+/// Coalesce the coin icon from a GQL `communityPointsSettings` response:
+/// custom coin first (`image.url2x`), global default orb second. Pure for
+/// testability.
+fn parse_coin_icon(v: &serde_json::Value) -> Option<String> {
+    let cps = v.pointer("/data/user/channel/communityPointsSettings")?;
+    cps.pointer("/image/url2x")
+        .and_then(|x| x.as_str())
+        .or_else(|| {
+            cps.pointer("/defaultImage/url2x")
+                .and_then(|x| x.as_str())
+        })
+        .map(str::to_owned)
 }
 
 /// Display info for a channel point reward: its title and icon URL
@@ -478,6 +531,37 @@ fn flatten_badge_sets(sets: Vec<BadgeSet>) -> HashMap<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Live-verified GQL fixture: channel with a CUSTOM coin (likh_tar).
+    const COIN_CUSTOM_JSON: &str = r#"{"data":{"user":{"channel":{"communityPointsSettings":{"image":{"url2x":"https://static-cdn.jtvnw.net/channel-points-icons/400589222/29c4fd4a-adc1-42fd-8a34-49185f1a6a32/icon-2.png"},"defaultImage":{"url2x":"https://static-cdn.jtvnw.net/channel-points-icons/orb-2.png"}}}}}}"#;
+
+    /// Live-verified GQL fixture: channel with the DEFAULT coin (jerma985).
+    const COIN_DEFAULT_JSON: &str = r#"{"data":{"user":{"channel":{"communityPointsSettings":{"image":null,"defaultImage":{"url2x":"https://static-cdn.jtvnw.net/channel-points-icons/orb-2.png"}}}}}}"#;
+
+    #[test]
+    fn coin_icon_custom_coin_wins() {
+        let v: serde_json::Value = serde_json::from_str(COIN_CUSTOM_JSON).unwrap();
+        assert_eq!(
+            parse_coin_icon(&v).as_deref(),
+            Some("https://static-cdn.jtvnw.net/channel-points-icons/400589222/29c4fd4a-adc1-42fd-8a34-49185f1a6a32/icon-2.png")
+        );
+    }
+
+    #[test]
+    fn coin_icon_falls_back_to_default_orb() {
+        let v: serde_json::Value = serde_json::from_str(COIN_DEFAULT_JSON).unwrap();
+        assert_eq!(
+            parse_coin_icon(&v).as_deref(),
+            Some("https://static-cdn.jtvnw.net/channel-points-icons/orb-2.png")
+        );
+    }
+
+    #[test]
+    fn coin_icon_none_on_garbage() {
+        let v: serde_json::Value = serde_json::json!({"errors": [{"message": "nope"}]});
+        assert_eq!(parse_coin_icon(&v), None);
+        assert_eq!(parse_coin_icon(&serde_json::Value::Null), None);
+    }
 
     const GLOBAL_BADGES_JSON: &str = r#"{
         "data": [

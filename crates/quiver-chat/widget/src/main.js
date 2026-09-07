@@ -426,10 +426,6 @@ function applyMeta(meta) {
     if (meta.theme.event_banner_secs !== undefined) {
       eventBannerMs = Number(meta.theme.event_banner_secs) * 1000;
     }
-    // Per-channel coin icon for default-icon redeems (theme.redeem_icon_url).
-    if (meta.theme.redeem_icon_url !== undefined) {
-      redeemIconUrl = meta.theme.redeem_icon_url || null;
-    }
   }
   applyUserStyles(meta.role_css, meta.custom_css);
 }
@@ -483,9 +479,6 @@ const EVENT_STYLES = {
   follow: { icon: "➕", bg: "rgba(0,255,180,.16)", border: "#00FFB4" },
 };
 let eventBannerMs = 8000;
-// Channel coin icon (theme.redeem_icon_url) for default-icon redeems;
-// null = no configured coin, fall back to the SVG.
-let redeemIconUrl = null;
 
 function showEvent(ev) {
   const style = EVENT_STYLES[ev.kind];
@@ -543,19 +536,12 @@ function showEvent(ev) {
       break;
   }
   // Icon: redeems (and any event carrying a reward image) show the REAL
-  // Twitch reward icon. Rewards using Twitch's default coin fall back to
-  // the channel-configured coin URL (theme.redeem_icon_url); the SVG coin
-  // is the last resort when nothing is configured.
+  // Twitch reward icon — the server coalesces the channel coin for
+  // default-icon rewards. The SVG coin is the last-resort fallback.
   if (ev.reward_image) {
     const icon = document.createElement("img");
     icon.className = "event-icon event-icon-img";
     icon.src = ev.reward_image;
-    icon.alt = "";
-    banner.append(icon);
-  } else if (ev.kind === "redeem" && redeemIconUrl) {
-    const icon = document.createElement("img");
-    icon.className = "event-icon event-icon-img";
-    icon.src = redeemIconUrl;
     icon.alt = "";
     banner.append(icon);
   } else if (ev.kind === "redeem") {

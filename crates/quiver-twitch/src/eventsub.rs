@@ -65,6 +65,7 @@ pub fn spawn(
     quit: tokio_util::sync::CancellationToken,
     gate: Arc<dyn Fn(&str) -> bool + Send + Sync>,
     deduper: crate::dedupe::SharedRedeemDeduper,
+    coin_icon: Option<String>,
 ) {
     tokio::spawn(async move {
         let mut backoff = Duration::from_secs(2);
@@ -72,7 +73,7 @@ pub fn spawn(
             if quit.is_cancelled() {
                 return;
             }
-            match run_session(&helix, &broadcaster_id, &tx, &quit, &gate, &deduper).await {
+            match run_session(&helix, &broadcaster_id, &tx, &quit, &gate, &deduper, &coin_icon).await {
                 SessionEnd::Quit => return,
                 SessionEnd::Reconnect(url) => {
                     // Twitch asks us to move to a specific socket; reconnect
@@ -107,6 +108,7 @@ async fn run_session(
     quit: &tokio_util::sync::CancellationToken,
     gate: &Arc<dyn Fn(&str) -> bool + Send + Sync>,
     deduper: &crate::dedupe::SharedRedeemDeduper,
+    coin_icon: &Option<String>,
 ) -> SessionEnd {
     let (ws, _resp) = match tokio_tungstenite::connect_async(EVENTSUB_WS_URL).await {
         Ok(x) => x,
@@ -172,10 +174,20 @@ async fn run_session(
             tracing::warn!(sub = spec.type_name, scope = spec.scope, "scope not granted — skipping eventsub subscription");
             continue;
         }
+        // channel.follow v2 requires moderator_user_id (the token user must
+        // be a moderator of the channel) alongside broadcaster_user_id.
+        let condition = if spec.type_name == "channel.follow" {
+            serde_json::json!({
+                "broadcaster_user_id": broadcaster_id,
+                "moderator_user_id": broadcaster_id,
+            })
+        } else {
+            serde_json::json!({ "broadcaster_user_id": broadcaster_id })
+        };
         let body = serde_json::json!({
             "type": spec.type_name,
             "version": spec.version,
-            "condition": { "broadcaster_user_id": broadcaster_id },
+            "condition": condition,
             "transport": { "method": "websocket", "session_id": session_id },
         });
         if let Err(e) = helix.create_eventsub_subscription(&body).await {
@@ -201,7 +213,7 @@ async fn run_session(
                 match message_type {
                     "notification" => {
                         let sub_type = v["metadata"]["subscription_type"].as_str().unwrap_or("");
-                        if let Some(frame) = map_event(sub_type, &v["payload"]["event"])
+                        if let Some(frame) = map_event(sub_type, &v["payload"]["event"], coin_icon)
                             && gate(frame["event"]["kind"].as_str().unwrap_or(""))
                         {
                             // Redeem frames dedupe cross-source (redemption
@@ -258,7 +270,11 @@ async fn run_session(
 /// Map an EventSub notification payload onto the widget's event-frame wire
 /// shape (`{type:"event", event:{kind, ...}}`). Returns None for types the
 /// widget does not render.
-fn map_event(sub_type: &str, ev: &serde_json::Value) -> Option<serde_json::Value> {
+fn map_event(
+    sub_type: &str,
+    ev: &serde_json::Value,
+    coin_icon: &Option<String>,
+) -> Option<serde_json::Value> {
     let kind = match sub_type {
         "channel.channel_points_custom_reward_redemption.add" => "redeem",
         "channel.hype_train.begin" => return hype("begin", ev),
@@ -273,16 +289,21 @@ fn map_event(sub_type: &str, ev: &serde_json::Value) -> Option<serde_json::Value
         _ => return None,
     };
 
+    // EventSub carries the reward title AND icon inline — no Helix lookup
+    // needed. Default-icon rewards (image null) fall back to the channel
+    // coin resolved via GQL at session start.
+    let reward_image = ev["reward"]["image"]["url_2x"]
+        .as_str()
+        .map(str::to_string)
+        .or_else(|| coin_icon.clone());
     Some(serde_json::json!({
         "type": "event",
         "event": {
             "kind": kind,
             "user_login": ev["user_login"].as_str().unwrap_or_default(),
             "display_name": ev["user_name"].as_str().unwrap_or_default(),
-            // EventSub carries the reward title AND icon inline — no Helix
-            // lookup needed.
             "reward_title": ev["reward"]["title"].as_str(),
-            "reward_image": ev["reward"]["image"]["url_2x"].as_str(),
+            "reward_image": reward_image,
             "user_input": ev["user_input"].as_str().unwrap_or_default(),
         }
     }))

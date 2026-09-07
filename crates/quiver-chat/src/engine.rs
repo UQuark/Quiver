@@ -15,7 +15,7 @@ use quiver_twitch::{
     RaidEvent, RedeemEvent, RewardInfo, SubEvent,
 };
 use serde::Serialize;
-use tracing::warn;
+use tracing::{info, warn};
 
 /// Rich chat events (subs/gifts/raids) on the wire.
 /// Transient by design: announced once, never part of snapshots.
@@ -399,6 +399,7 @@ pub async fn pump(
     tx: tokio::sync::broadcast::Sender<String>,
     filters: crate::filters::SharedCompiled,
     reward_titles: SharedRewardTitles,
+    coin_icon: Arc<RwLock<Option<String>>>,
     redeem_deduper: SharedRedeemDeduper,
     source: &mut quiver_twitch::IrcChatSource,
 ) {
@@ -495,12 +496,29 @@ pub async fn pump(
                         let _ = redeem_deduper
                             .lock()
                             .map(|mut d| d.mark_irc(&r.user_login, &r.user_id, &r.reward_id));
-                        let (reward_title, reward_image) = reward_titles
+                        let (reward_title, mut reward_image) = reward_titles
                             .read()
                             .ok()
                             .and_then(|m| m.get(&r.reward_id).cloned())
                             .map(|info| (Some(info.title), info.image_url))
                             .unwrap_or((None, None));
+                        // Default-icon rewards: fall back to the channel coin
+                        // (fetched anonymously via GQL by the serve layer).
+                        if reward_image.is_none() {
+                            reward_image = coin_icon
+                                .read()
+                                .ok()
+                                .and_then(|c| c.clone());
+                        }
+                        info!(
+                            reward_cached = reward_titles
+                                .read()
+                                .map(|m| m.contains_key(&r.reward_id))
+                                .unwrap_or(false),
+                            reward_title = ?reward_title,
+                            reward_image = ?reward_image,
+                            "redeem frame emitted"
+                        );
                         let mut wire = WireEvent::from(r);
                         if let WireEvent::Redeem { reward_title: rt, reward_image: ri, .. } = &mut wire {
                             *rt = reward_title;
