@@ -44,6 +44,17 @@ function lookupThirdParty(token) {
   return null;
 }
 
+// Does any DISABLED provider's map carry this token? Used to STRIP tokens
+// that exist only under a provider the user turned off — disabling means
+// the emote vanishes, never renders as literal text.
+function existsOnlyInDisabledProvider(token) {
+  for (const p of PROVIDER_ORDER) {
+    if (emoteFlags[p]) continue; // enabled providers are lookupThirdParty's job
+    if (thirdParty[p]?.[token]) return true;
+  }
+  return false;
+}
+
 // Unicode pictograph runs (incl. ZWJ sequences + variation selectors).
 const UNICODE_EMOJI_RE = /[\p{Extended_Pictographic}\u{1F3FB}-\u{1F3FF}\uFE0F\u200D]+/gu;
 
@@ -66,6 +77,10 @@ function appendTokens(wrap, text) {
       img.src = url;
       img.alt = part;
       wrap.append(img);
+    } else if (existsOnlyInDisabledProvider(part)) {
+      // The token lives only under a provider the user disabled (7TV/BTTV/
+      // FFZ): strip it entirely — same contract as twitch=false dropping
+      // emote ranges and unicode=false stripping emoji characters.
     } else {
       wrap.append(document.createTextNode(part));
     }
@@ -216,13 +231,13 @@ function renderText(m) {
         img.alt = m.text.slice(r.start, r.end);
         wrap.append(img);
       } else {
-        // Twitch emotes disabled: the code goes through plain-text
-        // handling — appendTokens runs the third-party provider lookup
-        // (a matching 7TV/BTTV/FFZ emote still images) and the unicode
-        // strip. Without this branch the range was SILENTLY DELETED
-        // whenever only `unicode` stayed enabled (twitch=false,
-        // unicode=true): the cursor advanced but no text appeared.
-        appendTokens(wrap, m.text.slice(r.start, r.end));
+        // Twitch emotes disabled: the range is DROPPED entirely —
+        // disabling a provider means its emotes Vanish from rendered
+        // messages, not that the code shows as literal text (same
+        // contract as unicode=false stripping emoji chars). The old
+        // fall-through dropped it accidentally; this branch makes the
+        // drop deliberate and equally applicable to twitch=false with
+        // unicode=true.
       }
     } else {
       wrap.append(gifElement(r, m.text.slice(r.start, r.end)));
