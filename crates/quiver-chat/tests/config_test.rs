@@ -204,6 +204,40 @@ fn lint_tolerates_unclosed_final_block_like_browsers_do() {
     );
 }
 
+// ---- filters -------------------------------------------------------------
+
+/// Regression for #11: an empty regex item must be rejected at validation,
+/// since `Regex::new("")` matches every string — in denylist mode it would
+/// silently silence ALL chat with no error anywhere.
+#[test]
+fn empty_filter_regex_item_is_rejected() {
+    let raw = r##"
+(
+    server: ( listen: "127.0.0.1:1", ),
+    twitch: ( channel: "chan", ),
+    theme: (
+        font_size_px: 18,
+        max_messages: 30,
+        message_lifetime_secs: 60,
+    ),
+    filters: (
+        content: Some((
+            mode: denylist,
+            items: ["nightbot", ""],
+        )),
+    ),
+)
+"##;
+    let cfg: ChatConfig = parse_str(raw).expect("must parse");
+    let issues = cfg.validate();
+    assert!(
+        issues.iter().any(|i| {
+            i.path == "filters.content.items" && i.message.contains("empty pattern")
+        }),
+        "empty regex item must be rejected, got: {issues:?}"
+    );
+}
+
 // ---- role_css -------------------------------------------------------------
 
 // Ground truth by hand: three roles, exact strings preserved.

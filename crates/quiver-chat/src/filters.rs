@@ -60,6 +60,16 @@ impl RegexDim {
     fn compile(dim: &ListFilter) -> Result<Self, String> {
         let mut res = Vec::new();
         for item in &dim.items {
+            // An empty pattern matches every string (position-0 match),
+            // silently blocking all chat in denylist mode and neutering
+            // every other pattern in allowlist mode. validate() rejects it;
+            // this is defense-in-depth for programmatic construction.
+            if item.is_empty() {
+                return Err(
+                    "empty pattern matches every message — refusing (likely a config error)"
+                        .to_string(),
+                );
+            }
             res.push(Regex::new(item).map_err(|e| format!("{item:?}: {e}"))?);
         }
         Ok(Self {
@@ -401,5 +411,17 @@ mod tests {
         let mut c = cfg();
         c.content = Some(list(Mode::Denylist, &["[unclosed"]));
         assert!(CompiledFilters::compile(&c).is_err());
+    }
+
+    /// Regression for #11: the empty pattern matches EVERY string
+    /// (position-0 match) and would silently block all chat in denylist
+    /// mode. compile() must refuse it even when constructed programmatically
+    /// (bypassing config validation).
+    #[test]
+    fn empty_regex_item_refuses_to_compile() {
+        let mut c = cfg();
+        c.content = Some(list(Mode::Denylist, &["nightbot", ""]));
+        let err = CompiledFilters::compile(&c).expect_err("empty pattern must be refused");
+        assert!(err.contains("empty pattern"), "unexpected error: {err}");
     }
 }
