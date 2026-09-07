@@ -213,8 +213,14 @@ function renderText(m) {
         }
         img.alt = m.text.slice(r.start, r.end);
         wrap.append(img);
-      } else if (!emoteFlags.unicode) {
-        // Both disabled: the code counts as an emoji — strip it.
+      } else {
+        // Twitch emotes disabled: the code goes through plain-text
+        // handling — appendTokens runs the third-party provider lookup
+        // (a matching 7TV/BTTV/FFZ emote still images) and the unicode
+        // strip. Without this branch the range was SILENTLY DELETED
+        // whenever only `unicode` stayed enabled (twitch=false,
+        // unicode=true): the cursor advanced but no text appeared.
+        appendTokens(wrap, m.text.slice(r.start, r.end));
       }
     } else {
       wrap.append(gifElement(r, m.text.slice(r.start, r.end)));
