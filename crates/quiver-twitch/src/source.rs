@@ -195,17 +195,31 @@ fn map_user_notice(un: UserNoticeMessage) -> Event {
             mass_gift_count,
             sender_total_gifts,
             sub_plan,
-        } => {
-            // Anonymous mystery gifts carry a dummy sender (see lib docs).
-            let anon = un.sender.login.eq_ignore_ascii_case("ananonymousgifter");
-            Event::MysteryGift(MysteryGiftEvent {
-                gifter_login: (!anon).then(|| un.sender.login.clone()),
-                gifter_display_name: (!anon).then(|| un.sender.name.clone()),
-                mass_gift_count,
-                sender_total_gifts,
-                tier: sub_plan,
-            })
-        }
+        } => Event::MysteryGift(MysteryGiftEvent {
+            // Non-anonymous: a real sender is always present — twitch-irc
+            // routes every dummy-account gift into AnonSubMysteryGift, so
+            // the sender here is genuinely named.
+            gifter_login: Some(un.sender.login.clone()),
+            gifter_display_name: Some(un.sender.name.clone()),
+            mass_gift_count,
+            sender_total_gifts,
+            tier: sub_plan,
+        }),
+        UserNoticeEvent::AnonSubMysteryGift {
+            mass_gift_count,
+            sub_plan,
+        } => Event::MysteryGift(MysteryGiftEvent {
+            // Anonymous: NO gifter identity by definition. The old
+            // anananonymousgifter login heuristic was unreachable — the
+            // library routes every anonymous gift (dummy account id
+            // 274598607, and every anonsubmysterygift msg-id) into this
+            // variant. The variant is the reliable anonymity signal.
+            gifter_login: None,
+            gifter_display_name: None,
+            mass_gift_count,
+            sender_total_gifts: None,
+            tier: sub_plan,
+        }),
         UserNoticeEvent::Raid { viewer_count, .. } => Event::Raid(RaidEvent {
             from_login: un.sender.login,
             from_display_name: un.sender.name,
@@ -472,6 +486,25 @@ mod tests {
                 assert_eq!(m.mass_gift_count, 10);
                 assert_eq!(m.sender_total_gifts, Some(55));
                 assert_eq!(m.tier, "1000");
+            }
+            other => panic!("expected MysteryGift, got {other:?}"),
+        }
+    }
+
+    /// Ground truth: anonymous mystery gift (anonsubmysterygift msg-id). The
+    /// sender is Twitch's dummy account — the variant is the anonymity
+    /// signal, NOT the login string. Regression for #39 (these used to
+    /// fall through to Event::Other and vanish from the widget).
+    #[test]
+    fn maps_anonymous_mystery_gift_with_no_gifter_identity() {
+        let line = "@badge-info=;badges=;color=;display-name=xQcOW;emotes=;flags=;id=8db97752-3dee-460b-9001-e925d0e2ba5b;login=xqcow;mod=0;msg-id=anonsubmysterygift;msg-param-mass-gift-count=15;msg-param-origin-id=13\\s33\\sed\\sc0\\sef\\sa0\\s7b\\s9b\\s48\\s59\\scb\\scc\\se4\\s39\\s7b\\s90\\sf9\\s54\\s75\\s66;msg-param-sub-plan=2000;room-id=71092938;subscriber=0;system-msg=An\\sanonymous\\suser\\sis\\sgifting\\s10\\sTier\\s1\\sSubs\\sto\\sxQcOW's\\scommunity!;tmi-sent-ts=1585447099603;user-id=71092938;user-type= :tmi.twitch.tv USERNOTICE #xqcow";
+        match parse_line_to_event(&line) {
+            Event::MysteryGift(m) => {
+                assert_eq!(m.gifter_login, None);
+                assert_eq!(m.gifter_display_name, None);
+                assert_eq!(m.mass_gift_count, 15);
+                assert_eq!(m.sender_total_gifts, None);
+                assert_eq!(m.tier, "2000");
             }
             other => panic!("expected MysteryGift, got {other:?}"),
         }
