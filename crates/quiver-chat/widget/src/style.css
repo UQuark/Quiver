@@ -172,6 +172,14 @@ body {
   animation: msg-in 180ms ease-out;
 }
 
+/* Banner fade-out: mirrors the .msg.expiring rule so the expiring class
+   (added by main.js before removal) actually fades instead of popping. */
+.event.expiring {
+  opacity: 0;
+  transform: translateY(-4px);
+  transition: opacity 300ms ease-in, transform 300ms ease-in;
+}
+
 .event-icon {
   font-size: 1.2em;
 }
