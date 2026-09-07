@@ -127,6 +127,51 @@ pub(crate) fn spawn_watcher(config_path: PathBuf, ctx: ReloadCtx, quit: Cancella
     });
 }
 
+/// Periodically re-run custom badge resolution so `refresh_interval_secs`
+/// actually happens. Without this task, resolve_full only ran at boot and
+/// on config edits — the conditional-GET/ETag/stale-serve machinery in
+/// resolve_http was unreachable dead code, and a cache file deleted by an
+/// external cleaner stayed 404 until the user touched the config.
+///
+/// resolve_http short-circuits fresh entries (no network); only stale
+/// entries get a conditional GET, so a full pass is cheap when nothing
+/// needs revalidating. The interval is re-read every cycle, so config
+/// edits change the cadence without a restart; a disabled badges section
+/// just re-checks on the default cadence.
+pub(crate) fn spawn_badge_refresh(
+    live: SharedLive,
+    custom_badges: crate::badges::SharedBadgeCache,
+    quit: CancellationToken,
+) {
+    tokio::spawn(async move {
+        loop {
+            let interval_secs = live
+                .read()
+                .ok()
+                .and_then(|l| l.badges.as_ref().map(|b| b.refresh_interval_secs.max(1)))
+                .unwrap_or(86400);
+            tokio::select! {
+                _ = quit.cancelled() => return,
+                _ = tokio::time::sleep(Duration::from_secs(interval_secs)) => {
+                    let Some(cfg) = live.read().ok().and_then(|l| l.badges.clone()) else {
+                        continue; // badges not configured — re-check next cycle
+                    };
+                    let http = reqwest::Client::new();
+                    match crate::badges::resolve_full(&cfg, &http).await {
+                        Ok(state) => {
+                            if let Ok(mut g) = custom_badges.write() {
+                                *g = Some(state);
+                            }
+                            info!(interval_secs, "custom badge cache revalidated");
+                        }
+                        Err(e) => warn!(error = %e, "badge revalidation failed — keeping current cache"),
+                    }
+                }
+            }
+        }
+    });
+}
+
 async fn apply_reload(path: &Path, ctx: &ReloadCtx) {
     // 1. Load. Any failure rejects the whole reload.
     let new_cfg: ChatConfig = match quiver_config::load_from_path(path) {
