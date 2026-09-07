@@ -279,101 +279,149 @@ fn router(state: AppState) -> Router {
 
 /// Supervised Twitch feed. Keeps ONE source alive across config reloads:
 /// channel swaps are performed live via part/join on the client handle.
+///
+/// The SUPERVISOR tier (this task) restarts `feed_session` when it PANICS
+/// (JoinError = panic unwound through the session) — previously the spawned
+/// task's JoinHandle was dropped and a panic permanently killed chat until
+/// process restart. A clean session return happens only on the shutdown
+/// signal (Swap(None): swap_tx dropped by the caller), which stops
+/// supervision. swap_rx lives in an Arc<Mutex> so it survives task panics.
 fn spawn_feed(
     live: SharedLive,
     messages: engine::SharedState,
     tx: broadcast::Sender<String>,
     filters: crate::filters::SharedCompiled,
 ) -> FeedHandle {
-    let (swap_tx, mut swap_rx) = mpsc::unbounded_channel::<String>();
+    let (swap_tx, swap_rx) = mpsc::unbounded_channel::<String>();
+    let swap_rx = Arc::new(tokio::sync::Mutex::new(swap_rx));
     tokio::spawn(async move {
         let mut backoff = INITIAL_BACKOFF;
-        'outer: loop {
-            let channel = live.read().unwrap().channel.clone();
-            let Ok(mut source) = quiver_twitch::IrcChatSource::connect_anonymous(channel.clone())
-            else {
-                warn!(%channel, "could not start chat feed");
-                tokio::time::sleep(backoff).await;
-                backoff = (backoff * 2).min(MAX_BACKOFF);
-                continue;
-            };
-            info!(%channel, "joining twitch chat");
-
-            // The channel this connection is actually joined to. Starts at
-            // the connect target and tracks every successful swap. Using a
-            // mutable local (rather than re-reading the outer `channel`
-            // snapshot) means a second swap parts the CURRENT channel, not
-            // the one the session originally joined.
-            let mut joined = channel;
-
-            'session: loop {
-                let started_at = Instant::now();
-
-                enum FeedEvent {
-                    Ended,
-                    Swap(Option<String>),
-                }
-                // Scope the pump future so `source` frees for the swap path.
-                let event = {
-                    let mut pump_fut = std::pin::pin!(engine::pump(
-                        live.clone(),
-                        messages.clone(),
-                        tx.clone(),
-                        filters.clone(),
-                        &mut source
-                    ));
-                    tokio::select! {
-                        _ = &mut pump_fut => FeedEvent::Ended,
-                        swapped = swap_rx.recv() => FeedEvent::Swap(swapped),
+        loop {
+            let session = tokio::spawn(feed_session(
+                live.clone(),
+                messages.clone(),
+                tx.clone(),
+                filters.clone(),
+                swap_rx.clone(),
+            ));
+            match session.await {
+                Ok(()) => break, // shutdown signal only
+                Err(e) => {
+                    if e.is_panic() {
+                        warn!(error = %e, "chat feed task panicked — restarting");
+                    } else {
+                        warn!(error = %e, "chat feed task cancelled — restarting");
                     }
-                };
-
-                match event {
-                    FeedEvent::Ended => {
-                        if started_at.elapsed() > HEALTHY_FEED_RUNTIME {
-                            backoff = INITIAL_BACKOFF;
-                        }
-                        warn!("chat feed ended");
-                        break 'session;
-                    }
-                    FeedEvent::Swap(None) => break 'outer, // watcher gone: shutdown
-                    FeedEvent::Swap(Some(new_channel)) => {
-                        // Stale-swap guard: swap requests can pile up in the
-                        // queue while the feed is down (`swap_rx` is only
-                        // polled inside 'session). live already reflects the
-                        // newest config, so a queued target that differs from
-                        // live.channel is stale — applying it would part the
-                        // just-joined channel and re-join a superseded one,
-                        // and pump would then drop every message (straggler
-                        // gate mismatch) with no recovery.
-                        let want = live.read().map(|l| l.channel.clone()).unwrap_or_default();
-                        if new_channel == joined {
-                            // Already there (duplicate or stale) — nothing to do.
-                            continue 'session;
-                        }
-                        if new_channel != want {
-                            debug!(queued = %new_channel, want = %want, "stale channel swap ignored");
-                            continue 'session;
-                        }
-                        // swap_channel joins FIRST and parts the OLD channel only on success,
-                        // so on join failure the old feed keeps flowing (supervisor contract).
-                        // Same connection keeps flowing; resume pumping.
-                        swap_channel(&source, &joined, &new_channel, &messages, &tx);
-                        joined = new_channel;
-                        continue 'session;
-                    }
+                    // Swap requests queued during the backoff are drained by
+                    // the next incarnation (unbounded queue + shared rx).
+                    tokio::time::sleep(backoff).await;
+                    backoff = (backoff * 2).min(MAX_BACKOFF);
                 }
             }
-
-            warn!(sleep_secs = backoff.as_secs(), "restarting chat feed");
-            tokio::time::sleep(backoff).await;
-            backoff = (backoff * 2).min(MAX_BACKOFF);
         }
     });
     FeedHandle { swap_tx }
 }
 
-/// Join the new channel FIRST, part the old one only after success.
+// Join the new channel FIRST, part the old one only after success.
+/// One incarnation of the supervised feed: connect with backoff, pump until
+/// the source ends or the swap queue closes. Panics ARE possible (poisoned
+/// locks, library internals) — the supervisor restarts on JoinError.
+async fn feed_session(
+    live: SharedLive,
+    messages: engine::SharedState,
+    tx: broadcast::Sender<String>,
+    filters: crate::filters::SharedCompiled,
+    swap_rx: Arc<tokio::sync::Mutex<mpsc::UnboundedReceiver<String>>>,
+) {
+    let mut backoff = INITIAL_BACKOFF;
+    'outer: loop {
+        // Poisoned lock degrades to a reconnect (empty channel) instead of
+        // killing the feed — nothing here may panic by design.
+        let channel = live.read().map(|l| l.channel.clone()).unwrap_or_default();
+        let Ok(mut source) = quiver_twitch::IrcChatSource::connect_anonymous(channel.clone())
+        else {
+            warn!(%channel, "could not start chat feed");
+            tokio::time::sleep(backoff).await;
+            backoff = (backoff * 2).min(MAX_BACKOFF);
+            continue;
+        };
+        info!(%channel, "joining twitch chat");
+
+        // The channel this connection is actually joined to. Starts at the
+        // connect target and tracks every successful swap. Using a mutable
+        // local (rather than re-reading the outer `channel` snapshot) means
+        // a second swap parts the CURRENT channel, not the one the session
+        // originally joined.
+        let mut joined = channel;
+
+
+        'session: loop {
+            let started_at = Instant::now();
+
+            enum FeedEvent {
+                Ended,
+                Swap(Option<String>),
+            }
+            // Scope the pump future so `source` frees for the swap path.
+            let event = {
+                let mut pump_fut = std::pin::pin!(engine::pump(
+                    live.clone(),
+                    messages.clone(),
+                    tx.clone(),
+                    filters.clone(),
+                    &mut source
+                ));
+                tokio::select! {
+                    _ = &mut pump_fut => FeedEvent::Ended,
+                    swapped = async { swap_rx.lock().await.recv().await } => {
+                        FeedEvent::Swap(swapped)
+                    }
+                }
+            };
+
+            match event {
+                FeedEvent::Ended => {
+                    if started_at.elapsed() > HEALTHY_FEED_RUNTIME {
+                        backoff = INITIAL_BACKOFF;
+                    }
+                    warn!("chat feed ended");
+                    break 'session;
+                }
+                FeedEvent::Swap(None) => break 'outer, // watcher gone: shutdown
+                FeedEvent::Swap(Some(new_channel)) => {
+                    // Stale-swap guard: swap requests can pile up in the
+                    // queue while the feed is down (`swap_rx` is only
+                    // polled inside 'session). live already reflects the
+                    // newest config, so a queued target that differs from
+                    // live.channel is stale — applying it would part the
+                    // just-joined channel and re-join a superseded one,
+                    // and pump would then drop every message (straggler
+                    // gate mismatch) with no recovery.
+                    let want = live.read().map(|l| l.channel.clone()).unwrap_or_default();
+                    if new_channel == joined {
+                        // Already there (duplicate or stale) — nothing to do.
+                        continue 'session;
+                    }
+                    if new_channel != want {
+                        debug!(queued = %new_channel, want = %want, "stale channel swap ignored");
+                        continue 'session;
+                    }
+                    // swap_channel joins FIRST and parts the OLD channel only
+                    // on success, so on join failure the old feed keeps
+                    // flowing (supervisor contract).
+                    swap_channel(&source, &joined, &new_channel, &messages, &tx);
+                    joined = new_channel;
+                    continue 'session;
+                }
+            }
+        }
+
+        warn!(sleep_secs = backoff.as_secs(), "restarting chat feed");
+        tokio::time::sleep(backoff).await;
+        backoff = (backoff * 2).min(MAX_BACKOFF);
+    }
+}
 /// The new login was validated before the reload was accepted, so join
 /// failures here are logged and non-fatal — and the old feed MUST keep
 /// flowing, which is exactly why the part cannot happen first: parting
