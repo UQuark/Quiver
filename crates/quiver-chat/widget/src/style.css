@@ -184,6 +184,17 @@ body {
   font-size: 1.2em;
 }
 
+/* Real reward icon (redeem banners carry the Twitch coin/image inline). */
+.event-icon-img {
+  width: 1.4em;
+  height: 1.4em;
+  object-fit: contain;
+}
+
+/* CSS hooks: each banner row also carries `.event-<kind>`
+   (.event-redeem, .event-hype_train, .event-prediction, .event-poll, …)
+   so custom CSS can restyle per event type. */
+
 /* Reply thread header: full-width strip inside the message card.
    (.has-reply carries no unique styles anymore — the card look comes
    from .msg base; the class remains a customization hook.) */

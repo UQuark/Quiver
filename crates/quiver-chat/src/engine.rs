@@ -9,13 +9,15 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
+use tokio::sync::Notify;
+
 use crate::filters::MsgKind;
 use quiver_twitch::{
     Badge, ChatMessage, EmoteRef, Event, GifRef, GiftSubEvent, MessageDeleted, MysteryGiftEvent,
-    RaidEvent, RedeemEvent, SubEvent,
+    RaidEvent, RedeemEvent, RewardInfo, SubEvent,
 };
 use serde::Serialize;
-use tracing::warn;
+use tracing::{info, warn};
 
 /// Rich chat events (subs/gifts/raids) on the wire.
 /// Transient by design: announced once, never part of snapshots.
@@ -58,6 +60,9 @@ pub enum WireEvent {
         /// Resolved reward title when channel OAuth exists; None → the
         /// widget renders a generic label.
         reward_title: Option<String>,
+        /// Reward icon URL (Twitch coin icon) when resolvable; the widget
+        /// falls back to a text icon.
+        reward_image: Option<String>,
         user_input: String,
     },
 }
@@ -117,9 +122,10 @@ impl From<RedeemEvent> for WireEvent {
         Self::Redeem {
             user_login: r.user_login,
             display_name: r.display_name,
-            // Title resolution happens at emit time (Helix cache); the
+            // Title/image resolution happens at emit time (Helix cache); the
             // untyped fallback renders as "a channel point reward".
             reward_title: None,
+            reward_image: None,
             user_input: r.user_input,
         }
     }
@@ -339,36 +345,16 @@ impl EngineState {
 /// Shared handle used by the server and the pump task.
 pub type SharedState = Arc<Mutex<EngineState>>;
 
-/// reward_id -> reward title, resolved via Helix when channel OAuth exists.
-/// Refreshed periodically by the serve layer; the pump only reads it.
-pub type SharedRewardTitles = Arc<RwLock<HashMap<String, String>>>;
+/// reward_id -> reward display info (title + icon URL), resolved via Helix
+/// when channel OAuth exists. Refreshed periodically by the serve layer; the
+/// pump only reads it.
+pub type SharedRewardTitles = Arc<RwLock<HashMap<String, RewardInfo>>>;
 
-/// Shared ring buffer that suppresses duplicate redemption emissions across
-/// producers (IRC, poller, EventSub) within a 30s window, keyed by
-/// `user_login|reward_id`. Legitimate fast repeats of the same reward by the
-/// same user inside the window are coalesced — accepted tradeoff.
-#[derive(Default)]
-pub struct RedeemDeduper {
-    entries: VecDeque<(String, Instant)>,
-}
-
-impl RedeemDeduper {
-    const WINDOW: Duration = Duration::from_secs(30);
-
-    /// Returns true when this key was NOT seen in the window (and marks it).
-    pub fn check_and_mark(&mut self, key: String) -> bool {
-        let now = Instant::now();
-        self.entries
-            .retain(|(_, seen)| now.duration_since(*seen) < Self::WINDOW);
-        if self.entries.iter().any(|(k, _)| *k == key) {
-            return false;
-        }
-        self.entries.push_back((key, now));
-        true
-    }
-}
-
-pub type SharedRedeemDeduper = Arc<Mutex<RedeemDeduper>>;
+/// Cross-source redemption deduplication lives in quiver-twitch
+/// ([`quiver_twitch::dedupe`]) so the EventSub client can share the same
+/// ring. The IRC path NEVER suppresses its emissions — every redemption
+/// message that arrives is its own redemption and must render.
+pub type SharedRedeemDeduper = quiver_twitch::dedupe::SharedRedeemDeduper;
 
 /// Single filter decision point for the pump. No compiled filters = pass.
 fn permitted(
@@ -415,6 +401,8 @@ pub async fn pump(
     tx: tokio::sync::broadcast::Sender<String>,
     filters: crate::filters::SharedCompiled,
     reward_titles: SharedRewardTitles,
+    coin_icon: Arc<RwLock<Option<String>>>,
+    reward_miss_notify: Arc<Notify>,
     redeem_deduper: SharedRedeemDeduper,
     source: &mut quiver_twitch::IrcChatSource,
 ) {
@@ -504,23 +492,46 @@ pub async fn pump(
                     // shared Helix cache when channel OAuth exists; a miss
                     // renders as the generic "channel point reward" label.
                     if permitted(&filters, MsgKind::Redeem, &r.user_login, &r.display_name, &r.user_id, &[], &r.user_input) {
-                        // Cross-source dedupe: the poller/EventSub may have
-                        // emitted this redemption seconds ago.
-                        let key = format!("{}|{}", r.user_login, r.reward_id);
-                        let fresh = redeem_deduper
+                        // IRC ALWAYS renders a redemption — each message is
+                        // its own redemption (rapid repeats included). We
+                        // only MARK it so the poller/EventSub don't ALSO
+                        // deliver the same redemption moments later.
+                        let _ = redeem_deduper
                             .lock()
-                            .map(|mut d| d.check_and_mark(key))
-                            .unwrap_or(false);
-                        if !fresh {
-                            continue;
-                        }
-                        let reward_title = reward_titles
+                            .map(|mut d| d.mark_irc(&r.user_login, &r.user_id, &r.reward_id));
+                        let (reward_title, mut reward_image) = reward_titles
                             .read()
                             .ok()
-                            .and_then(|m| m.get(&r.reward_id).cloned());
+                            .and_then(|m| m.get(&r.reward_id).cloned())
+                            .map(|info| (Some(info.title), info.image_url))
+                            .unwrap_or((None, None));
+                        // Cache miss = a reward added to the channel
+                        // mid-stream: trigger the reactive refresher so the
+                        // NEXT redemption carries fresh info.
+                        if reward_title.is_none() {
+                            reward_miss_notify.notify_one();
+                        }
+                        // Default-icon rewards: fall back to the channel coin
+                        // (fetched anonymously via GQL by the serve layer).
+                        if reward_image.is_none() {
+                            reward_image = coin_icon
+                                .read()
+                                .ok()
+                                .and_then(|c| c.clone());
+                        }
+                        info!(
+                            reward_cached = reward_titles
+                                .read()
+                                .map(|m| m.contains_key(&r.reward_id))
+                                .unwrap_or(false),
+                            reward_title = ?reward_title,
+                            reward_image = ?reward_image,
+                            "redeem frame emitted"
+                        );
                         let mut wire = WireEvent::from(r);
-                        if let WireEvent::Redeem { reward_title: rt, .. } = &mut wire {
+                        if let WireEvent::Redeem { reward_title: rt, reward_image: ri, .. } = &mut wire {
                             *rt = reward_title;
+                            *ri = reward_image;
                         }
                         send_event(&tx, wire);
                     }

@@ -7,17 +7,19 @@
 //! touching them.
 
 pub mod auth;
-pub mod eventsub;
+pub mod dedupe;
 pub mod error;
 pub mod events;
+pub mod eventsub;
 pub mod helix;
 pub mod source;
 
 pub use auth::{ChannelToken, DEFAULT_SCOPES, StoredTokens};
+pub use dedupe::RedeemDeduper;
 pub use error::TwitchError;
 pub use events::{
     Badge, ChatMessage, EmoteRef, Event, GifRef, GiftSubEvent, MessageDeleted, MysteryGiftEvent,
     RaidEvent, RedeemEvent, ReplyParent, SubEvent,
 };
-pub use helix::{HelixClient, HelixError};
+pub use helix::{HelixClient, HelixError, Redemption, RewardInfo};
 pub use source::IrcChatSource;

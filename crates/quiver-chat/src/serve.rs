@@ -153,7 +153,21 @@ let css_cache_dir = cfg
         .with_channel_auth(),
     );
     let reward_titles: engine::SharedRewardTitles = Arc::new(RwLock::new(HashMap::new()));
-    let redeem_deduper: engine::SharedRedeemDeduper = Arc::new(Mutex::new(engine::RedeemDeduper::default()));
+    let redeem_deduper: engine::SharedRedeemDeduper =
+        Arc::new(std::sync::Mutex::new(quiver_twitch::RedeemDeduper::default()));
+    // Channel coin icon (GQL, anonymous): what Twitch shows for rewards
+    // without a custom uploaded icon. None = fetch failed/unresolved —
+    // the widget falls back to its SVG coin.
+    let coin_icon: Arc<RwLock<Option<String>>> = Arc::new(RwLock::new(None));
+    // Event-driven refresh signals (no ticker — see refresher below):
+    // - swap_gen: bumped by the reload layer on SwapChannel (a bounce
+    //   also retargets EventSub via broadcaster_slot)
+    // - miss_gen: bumped by pump/poller on a reward-cache miss (new
+    //   reward mid-stream) — self-healing without idle polling
+    //   (watch::Sender/Receiver: multi-consumer, no lost wakeups, no
+    //   permit stealing — the Notify variant had exactly that bug)
+    let (swap_tx, swap_rx) = tokio::sync::watch::channel(std::time::Instant::now());
+    let miss_gen = Arc::new(Notify::new());
     if helix.has_channel_auth() {
         info!(
             user = ?helix.channel_login(),
@@ -164,31 +178,80 @@ let css_cache_dir = cfg
         let reward_titles = reward_titles.clone();
         let live_for_titles = live.clone();
         let quit = quit.clone();
+        let coin_for_refresh = coin_icon.clone();
+        let mut swap_for_refresh = swap_rx.clone();
+        let miss_for_refresh = miss_gen.clone();
         tokio::spawn(async move {
-            let mut ticker = tokio::time::interval(Duration::from_secs(600));
-            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-            loop {
-                tokio::select! {
-                    _ = quit.cancelled() => return,
-                    _ = ticker.tick() => {
-                        let broadcaster = match live_for_titles.read().map(|l| l.channel.clone()) {
-                            Ok(ch) => ch,
-                            Err(_) => continue,
-                        };
-                        match crate::serve::channel_broadcaster_id(&helix, &broadcaster).await {
-                            Some(bid) => match helix.custom_reward_titles(&bid).await {
-                                Ok(map) => {
-                                    if let Ok(mut t) = reward_titles.write() {
-                                        *t = map;
-                                    }
-                                    debug!("reward title cache refreshed");
-                                }
-                                Err(e) => warn!(error = %e, "reward title refresh failed"),
-                            },
-                            None => {}
+            // Refresh once per trigger: immediately on boot, on channel
+            // swap, or on a cache miss (cooldown 10s so a burst of misses
+            // coalesces). No idle ticker.
+            const COOLDOWN: Duration = Duration::from_secs(10);
+            let mut last_run = Option::<tokio::time::Instant>::None;
+            async fn refresh(
+                helix: &quiver_twitch::HelixClient,
+                live: &SharedLive,
+                coin: &Arc<RwLock<Option<String>>>,
+                reward_titles: &engine::SharedRewardTitles,
+            ) {
+                let broadcaster = match live.read().map(|l| l.channel.clone()) {
+                    Ok(ch) => ch,
+                    Err(_) => return,
+                };
+                // Channel coin (anonymous GQL) — what Twitch shows for
+                // default-icon rewards on this channel.
+                match helix.coin_icon_url(&broadcaster).await {
+                    Some(url) => {
+                        if let Ok(mut c) = coin.write() {
+                            *c = Some(url);
                         }
                     }
+                    None => warn!("coin icon lookup failed — keeping previous"),
                 }
+                match crate::serve::channel_broadcaster_id(helix, &broadcaster).await {
+                    Some(bid) => {
+                        match helix.custom_reward_titles(&bid).await {
+                            Ok(map) => {
+                                let with_icon =
+                                    map.values().filter(|i| i.image_url.is_some()).count();
+                                info!(
+                                    rewards = map.len(),
+                                    with_icon,
+                                    "reward info cache refreshed"
+                                );
+                                if let Ok(mut t) = reward_titles.write() {
+                                    *t = map;
+                                }
+                            }
+                            Err(e) => warn!(error = %e, "reward title refresh failed"),
+                        }
+                    }
+                    None => {}
+                }
+            }
+
+            refresh(&helix, &live_for_titles, &coin_for_refresh, &reward_titles).await;
+            last_run = Some(tokio::time::Instant::now());
+            let mut swap_seen = *swap_for_refresh.borrow();
+            loop {
+                let swap_fut = swap_for_refresh.changed();
+                let miss_fut = miss_for_refresh.notified();
+                tokio::select! {
+                    _ = quit.cancelled() => return,
+                    _ = swap_fut => {
+                        swap_seen = *swap_for_refresh.borrow_and_update();
+                        info!("channel swapped — refreshing reward info + coin");
+                    }
+                    _ = miss_fut => {
+                        if let Some(t) = last_run
+                            && tokio::time::Instant::now().duration_since(t) < COOLDOWN
+                        {
+                            continue; // recent refresh — a single miss-burst already covered
+                        }
+                        debug!("reward cache miss — refreshing reward info");
+                    }
+                }
+                refresh(&helix, &live_for_titles, &coin_for_refresh, &reward_titles).await;
+                last_run = Some(tokio::time::Instant::now());
             }
         });
     }
@@ -222,6 +285,8 @@ let css_cache_dir = cfg
         let tx_for_poll = tx.clone();
         let filters_for_poll = filters.clone();
         let deduper_for_poll = redeem_deduper.clone();
+        let coin_for_poll = coin_icon.clone();
+        let miss_for_poll = miss_gen.clone();
         tokio::spawn(async move {
             let mut ticker = tokio::time::interval(Duration::from_secs(10));
             ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -247,18 +312,39 @@ let css_cache_dir = cfg
                             if age > 120 {
                                 continue;
                             }
-                            let key = format!("{}|{}", r.user_login, r.reward_id);
-                            let fresh = deduper_for_poll
+                            // Unique-redemption-id gate (vs EventSub) and the
+                            // IRC-coverage check: if IRC just rendered this
+                            // (user, reward), the poller skips.
+                            let delivered = deduper_for_poll
                                 .lock()
-                                .map(|mut d| d.check_and_mark(key))
-                                .unwrap_or(false);
-                            if !fresh {
+                                .map(|mut d| {
+                                    d.is_new_redemption_id(&r.id)
+                                        && !d.irc_already_rendered(
+                                            &r.user_login,
+                                            &r.user_id,
+                                            &r.reward_id,
+                                        )
+                                })
+                                .unwrap_or(true);
+                            if !delivered {
                                 continue;
                             }
-                            let title = reward_titles
+                            let info = reward_titles
                                 .read()
                                 .ok()
                                 .and_then(|m| m.get(&r.reward_id).cloned());
+                            let (title, mut image) = info
+                                .map(|i| (Some(i.title), i.image_url))
+                                .unwrap_or((None, None));
+                            // Cache miss = reward added mid-stream: trigger
+                            // the reactive refresher (cooldown in refresher).
+                            if title.is_none() {
+                                miss_for_poll.notify_one();
+                            }
+                            // Default-icon rewards: channel coin fallback.
+                            if image.is_none() {
+                                image = coin_for_poll.read().ok().and_then(|c| c.clone());
+                            }
                             if !crate::filters::CompiledFilters::permits_event(
                                 &filters_for_poll,
                                 crate::filters::MsgKind::Redeem,
@@ -276,6 +362,7 @@ let css_cache_dir = cfg
                                     "user_login": r.user_login,
                                     "display_name": r.user_display_name,
                                     "reward_title": title,
+                                    "reward_image": image,
                                     "user_input": r.user_input,
                                 }
                             });
@@ -294,6 +381,8 @@ let css_cache_dir = cfg
         tx.clone(),
         filters.clone(),
         reward_titles.clone(),
+        coin_icon.clone(),
+        miss_gen.clone(),
         redeem_deduper.clone(),
     );
 
@@ -313,10 +402,15 @@ let css_cache_dir = cfg
         // message_type filters gate each mapped frame via the `gate` closure
         // (kind string -> MsgKind -> permits_event).
         let helix = helix.clone();
-        let live_for_es = live.clone();
         let quit = quit.clone();
         let tx_for_es = tx.clone();
         let filters_for_es = filters.clone();
+        let deduper_for_es = redeem_deduper.clone();
+        let swap_for_es = swap_rx.clone();
+        // Current channel login resolver for EventSub (reads live per call).
+        let live_for_es = live.clone();
+        let channel_resolver: Arc<dyn Fn() -> Option<String> + Send + Sync> =
+            Arc::new(move || live_for_es.read().ok().and_then(|l| Some(l.channel.clone())));
         let gate = Arc::new(move |kind: &str| {
             let Some(kind_enum) = crate::filters::MsgKind::parse(kind) else {
                 return false;
@@ -331,12 +425,19 @@ let css_cache_dir = cfg
             )
         });
         tokio::spawn(async move {
-            // Resolve broadcaster once per process; channel swaps are rare
-            // and the IRC feed already covers the interim.
-            let Some(bid) = crate::serve::channel_broadcaster_id(&helix, &live_for_es.read().map(|l| l.channel.clone()).unwrap_or_default()).await else {
-                return;
-            };
-            quiver_twitch::eventsub::spawn(helix, bid, tx_for_es, quit, gate);
+            // EventSub re-targets on channel swap: per session it resolves
+            // the CURRENT channel (login via the resolver closure),
+            // broadcaster id, and coin — then bounces its socket when a swap
+            // lands mid-stream.
+            quiver_twitch::eventsub::spawn(
+                helix,
+                channel_resolver,
+                tx_for_es,
+                quit,
+                gate,
+                deduper_for_es,
+                swap_for_es,
+            );
         });
     }
 
@@ -352,6 +453,7 @@ let css_cache_dir = cfg
         emotes: emotes.clone(),
         filters: filters.clone(),
         rebind: rebind.clone(),
+        channel_changed: swap_tx,
     };
     crate::reload::spawn_watcher(config_path, ctx, quit.clone());
 
@@ -463,6 +565,8 @@ fn spawn_feed(
     tx: broadcast::Sender<String>,
     filters: crate::filters::SharedCompiled,
     reward_titles: engine::SharedRewardTitles,
+    coin_icon: Arc<RwLock<Option<String>>>,
+    miss_gen: Arc<Notify>,
     redeem_deduper: engine::SharedRedeemDeduper,
 ) -> FeedHandle {
     let (swap_tx, swap_rx) = mpsc::unbounded_channel::<String>();
@@ -476,6 +580,8 @@ fn spawn_feed(
                 tx.clone(),
                 filters.clone(),
                 reward_titles.clone(),
+                coin_icon.clone(),
+                miss_gen.clone(),
                 redeem_deduper.clone(),
                 swap_rx.clone(),
             ));
@@ -508,6 +614,8 @@ async fn feed_session(
     tx: broadcast::Sender<String>,
     filters: crate::filters::SharedCompiled,
     reward_titles: engine::SharedRewardTitles,
+    coin_icon: Arc<RwLock<Option<String>>>,
+    miss_gen: Arc<Notify>,
     redeem_deduper: engine::SharedRedeemDeduper,
     swap_rx: Arc<tokio::sync::Mutex<mpsc::UnboundedReceiver<String>>>,
 ) {
@@ -548,6 +656,8 @@ async fn feed_session(
                     tx.clone(),
                     filters.clone(),
                     reward_titles.clone(),
+                    coin_icon.clone(),
+                    miss_gen.clone(),
                     redeem_deduper.clone(),
                     &mut source
                 ));
@@ -708,6 +818,7 @@ pub(crate) fn meta_value(
             "font_size_px": live.theme.font_size_px,
             "max_messages": live.theme.max_messages,
             "overflow_mode": live.theme.overflow_mode,
+            "event_banner_secs": live.theme.event_banner_secs,
         },
         "badges": badges,
         "custom_css": custom_css,
@@ -1221,6 +1332,7 @@ mod tests {
                 custom_css: custom.map(|c| crate::config::CustomCssSource::Inline(c.to_string())),
                 role_css: role,
                 overflow_mode: crate::config::OverflowMode::Prune,
+                event_banner_secs: 8,
             },
             emotes: EmotesConfig::default(),
         }

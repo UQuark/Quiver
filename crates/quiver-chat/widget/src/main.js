@@ -367,10 +367,9 @@ function rerender() {
   const banners = [...chat.querySelectorAll(".event")];
   for (const c of chat.children) unwatchHeight(c);
   chat.replaceChildren(...history.map(renderMessage));
-  // Banners were collected in DOM order (newest first — showEvent prepends),
-  // so re-prepending in that order must be REVERSED, or the stacking flips
-  // (oldest on top) after every hot config reload.
-  for (const b of banners.reverse()) chat.prepend(b);
+  // Banners are in-flow (appended chronologically, newest LAST), so
+  // re-appending in collected DOM order preserves their positions.
+  for (const b of banners) chat.append(b);
   requestAnimationFrame(settleOverflow);
 }
 
@@ -423,6 +422,10 @@ function applyMeta(meta) {
     if (meta.theme.font_size_px) chat.style.fontSize = `${meta.theme.font_size_px}px`;
     if (meta.theme.max_messages) maxMessages = meta.theme.max_messages;
     if (meta.theme.overflow_mode) applyOverflowMode(meta.theme.overflow_mode);
+    // Banner lifetime: seconds from config; 0 = banners stay (no auto-dismiss).
+    if (meta.theme.event_banner_secs !== undefined) {
+      eventBannerMs = Number(meta.theme.event_banner_secs) * 1000;
+    }
   }
   applyUserStyles(meta.role_css, meta.custom_css);
 }
@@ -473,13 +476,17 @@ const EVENT_STYLES = {
   hype_train: { icon: "🚂", bg: "rgba(255,0,110,.22)", border: "#FF006E" },
   prediction: { icon: "📊", bg: "rgba(0,120,255,.18)", border: "#0078FF" },
   poll: { icon: "🗳️", bg: "rgba(0,200,120,.18)", border: "#00C878" },
+  follow: { icon: "➕", bg: "rgba(0,255,180,.16)", border: "#00FFB4" },
 };
-const EVENT_BANNER_MS = 8000;
+let eventBannerMs = 8000;
 
 function showEvent(ev) {
   const style = EVENT_STYLES[ev.kind];
   if (!style) return;
-  const banner = el("div", "event");
+  // In-flow event rows live in the chat stream where they actually
+  // happened. Kind-specific class (`.event-redeem`, …) is the CSS hook
+  // for custom styling; inline bg/border stay as the default look.
+  const banner = el("div", `event event-${ev.kind}`);
   banner.style.background = style.bg;
   banner.style.borderColor = style.border;
 
@@ -524,15 +531,46 @@ function showEvent(ev) {
         ? `Poll ended: ${ev.title}`
         : `${ev.phase === "lock" ? "Poll locked" : "Poll started"}: ${ev.title}`;
       break;
+    case "follow":
+      text = `${ev.display_name} just followed!`;
+      break;
   }
-  banner.append(el("span", "event-icon", style.icon), el("span", "event-text", text));
+  // Icon: redeems (and any event carrying a reward image) show the REAL
+  // Twitch reward icon — the server coalesces the channel coin for
+  // default-icon rewards. The SVG coin is the last-resort fallback.
+  if (ev.reward_image) {
+    const icon = document.createElement("img");
+    icon.className = "event-icon event-icon-img";
+    icon.src = ev.reward_image;
+    icon.alt = "";
+    banner.append(icon);
+  } else if (ev.kind === "redeem") {
+    const icon = document.createElement("span");
+    icon.className = "event-icon";
+    // Channel-points coin: gold circle with the Twitch glitch.
+    icon.innerHTML =
+      '<svg viewBox="0 0 16 16" width="1.4em" height="1.4em" style="vertical-align:middle">' +
+      '<circle cx="8" cy="8" r="7.2" fill="#FABE2E" stroke="#9147FF" stroke-width="1.6"/>' +
+      '<path d="M11.4 5.2c-.5-.5-1.4-.9-3.4-.9-1.4 0-2.6.4-3.4.9L3.2 8l1.4 2.8c.8.5 2 .9 3.4.9s2.6-.4 3.4-.9L12.8 8l-1.4-2.8z" fill="#9147FF"/>' +
+      "</svg>";
+    banner.append(icon);
+  } else {
+    banner.append(el("span", "event-icon", style.icon));
+  }
+  banner.append(el("span", "event-text", text));
 
-  // Banners ride ABOVE the chat flow and leave on their own.
-  chat.prepend(banner);
-  setTimeout(() => {
-    banner.classList.add("expiring");
-    setTimeout(() => banner.remove(), EXPIRE_FADE_MS);
-  }, EVENT_BANNER_MS);
+  // In-flow: banners appear WHERE they happened (chronological bottom of
+  // the stream), not pinned above everything.
+  chat.append(banner);
+
+  // Auto-dismiss after the configured duration; `0` (theme) keeps them
+  // in the flow until later messages push them out.
+  if (eventBannerMs > 0) {
+    setTimeout(() => {
+      banner.classList.add("expiring");
+      setTimeout(() => banner.remove(), EXPIRE_FADE_MS);
+    }, eventBannerMs);
+  }
 }
 
 function handle(wire) {

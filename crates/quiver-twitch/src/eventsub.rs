@@ -14,8 +14,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures_util::StreamExt;
-use tokio::sync::broadcast;
+use tokio::sync::{Notify, broadcast};
 use tokio_tungstenite::tungstenite::Message as WsMessage;
+use tracing::info;
 
 use crate::helix::HelixClient;
 
@@ -41,8 +42,8 @@ pub const DEFAULT_SUBSCRIPTIONS: &[SubSpec] = &[
     SubSpec { type_name: "channel.prediction.lock", version: "1", scope: "channel:read:predictions", cost: 1 },
     SubSpec { type_name: "channel.prediction.end", version: "1", scope: "channel:read:predictions", cost: 1 },
     SubSpec { type_name: "channel.poll.begin", version: "1", scope: "channel:read:polls", cost: 1 },
-    SubSpec { type_name: "channel.poll.lock", version: "1", scope: "channel:read:polls", cost: 1 },
     SubSpec { type_name: "channel.poll.end", version: "1", scope: "channel:read:polls", cost: 1 },
+    SubSpec { type_name: "channel.follow", version: "2", scope: "moderator:read:followers", cost: 1 },
 ];
 
 fn enabled_specs() -> Vec<SubSpec> {
@@ -53,15 +54,33 @@ fn enabled_specs() -> Vec<SubSpec> {
 /// event frames onto `tx` (the same broadcast channel the engine uses).
 /// Exits when `quit` cancels; reconnects with backoff otherwise.
 ///
+/// Slots (kept fresh by the serve layer):
+/// - `broadcaster_slot`: current broadcaster id — re-read per session so a
+///   channel swap re-targets subscriptions without a restart
+/// - `coin_slot`: the channel's coin icon URL — read per session so
+///   default-icon redeem banners always carry the right coin
+///
+/// `swap`: notified by the reload layer on channel swap — bounces the
+/// active session so the re-target happens within ~seconds.
+///
 /// `gate`: called with the mapped event `kind` — false suppresses the frame
 /// (the chat layer's message_type filters flow through here as a closure,
 /// since quiver-twitch cannot depend on quiver-chat).
+/// `deduper`: cross-source redemption dedupe — EventSub marks/deduplicates
+/// `channel_resolver`: returns the CURRENT channel login — re-read per
+/// session so a channel swap re-targets subscriptions without a restart.
+///
+/// `swap`: fired by the reload layer on channel swap — bounces the active
+/// session so the re-target happens within ~seconds. The coin icon is
+/// resolved per session via anonymous GQL against the current channel.
 pub fn spawn(
     helix: Arc<HelixClient>,
-    broadcaster_id: String,
+    channel_resolver: Arc<dyn Fn() -> Option<String> + Send + Sync>,
     tx: broadcast::Sender<String>,
     quit: tokio_util::sync::CancellationToken,
     gate: Arc<dyn Fn(&str) -> bool + Send + Sync>,
+    deduper: crate::dedupe::SharedRedeemDeduper,
+    mut swap: tokio::sync::watch::Receiver<std::time::Instant>,
 ) {
     tokio::spawn(async move {
         let mut backoff = Duration::from_secs(2);
@@ -69,23 +88,67 @@ pub fn spawn(
             if quit.is_cancelled() {
                 return;
             }
-            match run_session(&helix, &broadcaster_id, &tx, &quit, &gate).await {
-                SessionEnd::Quit => return,
-                SessionEnd::Reconnect(url) => {
-                    // Twitch asks us to move to a specific socket; reconnect
-                    // immediately and resubscribe there.
-                    let _ = url;
+            // Per-session state: current channel login → broadcaster id →
+            // coin. A swap bounces the session; the next one resolves fresh.
+            let Some(channel_login) = (channel_resolver)() else {
+                // Live config lost its channel (transient) — brief wait.
+                tokio::select! {
+                    _ = quit.cancelled() => return,
+                    _ = swap.changed() => {}
+                    _ = tokio::time::sleep(Duration::from_millis(500)) => {}
+                }
+                continue;
+            };
+            let Ok(broadcaster_id) = helix.user_id(&channel_login).await else {
+                tracing::warn!(channel = %channel_login, "broadcaster id lookup failed — retrying");
+                tokio::select! {
+                    _ = quit.cancelled() => return,
+                    _ = swap.changed() => {}
+                    _ = tokio::time::sleep(backoff) => {}
+                }
+                backoff = (backoff * 2).min(Duration::from_secs(60));
+                continue;
+            };
+            let coin = helix.coin_icon_url(&channel_login).await;
+            let mut session = tokio::spawn(run_session(
+                helix.clone(),
+                broadcaster_id,
+                tx.clone(),
+                quit.clone(),
+                gate.clone(),
+                deduper.clone(),
+                coin,
+                swap.clone(),
+            ));
+            tokio::select! {
+                res = &mut session => match res {
+                    Ok(_) => {
+                        // Clean end happens only on shutdown paths.
+                        tracing::info!("eventsub session ended");
+                        tokio::time::sleep(Duration::from_secs(2)).await;
+                    }
+                    Err(e) => {
+                        if e.is_panic() {
+                            tracing::warn!(error = %e, "eventsub session panicked — reconnecting");
+                        } else {
+                            tracing::warn!(error = %e, "eventsub session cancelled — reconnecting");
+                        }
+                        tokio::time::sleep(backoff).await;
+                        backoff = (backoff * 2).min(Duration::from_secs(60));
+                    }
+                },
+                _ = quit.cancelled() => {
+                    session.abort();
+                    return;
+                }
+                _ = swap.changed() => {
+                    // Channel swap: bounce the socket so the next session
+                    // subscribes against the new broadcaster.
+                    session.abort();
+                    info!("eventsub re-targeting on channel swap");
                     backoff = Duration::from_secs(2);
                 }
-                SessionEnd::Dropped => {
-                    tracing::warn!(backoff_secs = backoff.as_secs(), "eventsub dropped — reconnecting");
-                }
             }
-            tokio::select! {
-                _ = quit.cancelled() => return,
-                _ = tokio::time::sleep(backoff) => {}
-            }
-            backoff = (backoff * 2).min(Duration::from_secs(60));
         }
     });
 }
@@ -98,11 +161,14 @@ enum SessionEnd {
 
 /// One websocket session: welcome → subscribe → notifications.
 async fn run_session(
-    helix: &HelixClient,
-    broadcaster_id: &str,
-    tx: &broadcast::Sender<String>,
-    quit: &tokio_util::sync::CancellationToken,
-    gate: &Arc<dyn Fn(&str) -> bool + Send + Sync>,
+    helix: Arc<HelixClient>,
+    broadcaster_id: String,
+    tx: broadcast::Sender<String>,
+    quit: tokio_util::sync::CancellationToken,
+    gate: Arc<dyn Fn(&str) -> bool + Send + Sync>,
+    deduper: crate::dedupe::SharedRedeemDeduper,
+    coin_icon: Option<String>,
+    mut swap: tokio::sync::watch::Receiver<std::time::Instant>,
 ) -> SessionEnd {
     let (ws, _resp) = match tokio_tungstenite::connect_async(EVENTSUB_WS_URL).await {
         Ok(x) => x,
@@ -113,23 +179,41 @@ async fn run_session(
     };
     let (_write, mut read) = ws.split();
 
-    // First message MUST be session_welcome.
+    // First message MUST be session_welcome — but Twitch sends a protocol
+    // PING frame FIRST on some networks (observed live): non-Text frames
+    // are skipped, not fatal.
     let session_id = loop {
-        let Some(Ok(WsMessage::Text(text))) = read.next().await else {
-            return SessionEnd::Dropped;
-        };
-        let v: serde_json::Value = match serde_json::from_str(&text) {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-        match v["metadata"]["message_type"].as_str() {
-            Some("session_welcome") => {
-                let id = v["payload"]["session"]["id"].as_str().unwrap_or_default().to_string();
-                tracing::info!(session = %id, "eventsub session welcome");
-                break id;
+        match read.next().await {
+            Some(Ok(WsMessage::Text(text))) => {
+                let v: serde_json::Value = match serde_json::from_str(&text) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+                match v["metadata"]["message_type"].as_str() {
+                    Some("session_welcome") => {
+                        let id = v["payload"]["session"]["id"]
+                            .as_str()
+                            .unwrap_or_default()
+                            .to_string();
+                        tracing::info!(session = %id, "eventsub session welcome");
+                        break id;
+                    }
+                    Some(other) => {
+                        tracing::debug!(t = other, "eventsub pre-welcome frame ignored")
+                    }
+                    None => {}
+                }
             }
-            Some(other) => tracing::debug!(t = other, "eventsub pre-welcome frame ignored"),
-            None => {}
+            // Transport-level Ping/Pong frames (observed: a bare PING
+            // arrives BEFORE session_welcome) — skip, keep reading.
+            Some(Ok(WsMessage::Ping(_) | WsMessage::Pong(_))) => continue,
+            other => {
+                tracing::warn!(
+                    frame = ?other.map(|m| format!("{m:?}")).unwrap_or_default(),
+                    "eventsub closed before session_welcome — dropping"
+                );
+                return SessionEnd::Dropped;
+            }
         }
     };
 
@@ -150,10 +234,20 @@ async fn run_session(
             tracing::warn!(sub = spec.type_name, scope = spec.scope, "scope not granted — skipping eventsub subscription");
             continue;
         }
+        // channel.follow v2 requires moderator_user_id (the token user must
+        // be a moderator of the channel) alongside broadcaster_user_id.
+        let condition = if spec.type_name == "channel.follow" {
+            serde_json::json!({
+                "broadcaster_user_id": broadcaster_id,
+                "moderator_user_id": broadcaster_id,
+            })
+        } else {
+            serde_json::json!({ "broadcaster_user_id": broadcaster_id })
+        };
         let body = serde_json::json!({
             "type": spec.type_name,
             "version": spec.version,
-            "condition": { "broadcaster_user_id": broadcaster_id },
+            "condition": condition,
             "transport": { "method": "websocket", "session_id": session_id },
         });
         if let Err(e) = helix.create_eventsub_subscription(&body).await {
@@ -162,25 +256,58 @@ async fn run_session(
     }
 
     // Notification loop.
+    let mut swap = swap;
     loop {
         tokio::select! {
             _ = quit.cancelled() => return SessionEnd::Quit,
+            _ = swap.changed() => {
+                // Channel swap: end this session; the supervisor reconnects
+                // against the new channel immediately.
+                info!("eventsub session bounces for channel swap");
+                return SessionEnd::Dropped;
+            }
             msg = read.next() => {
-                let Some(Ok(WsMessage::Text(text))) = msg else {
-                    return SessionEnd::Dropped;
-                };
-                let v: serde_json::Value = match serde_json::from_str(&text) {
-                    Ok(v) => v,
-                    Err(_) => continue,
-                };
+                match msg {
+                    // Transport-level Ping/Pong: skip (tungstenite answers
+                    // pings at the protocol layer automatically).
+                    Some(Ok(WsMessage::Ping(_) | WsMessage::Pong(_))) => {}
+                    Some(Ok(WsMessage::Text(text))) => {
+                        let v: serde_json::Value = match serde_json::from_str(&text) {
+                            Ok(v) => v,
+                            Err(_) => continue,
+                        };
                 let message_type = v["metadata"]["message_type"].as_str().unwrap_or("");
                 match message_type {
                     "notification" => {
                         let sub_type = v["metadata"]["subscription_type"].as_str().unwrap_or("");
-                        if let Some(frame) = map_event(sub_type, &v["payload"]["event"])
+                        if let Some(frame) = map_event(sub_type, &v["payload"]["event"], &coin_icon)
                             && gate(frame["event"]["kind"].as_str().unwrap_or(""))
                         {
-                            let _ = tx.send(frame.to_string());
+                            // Redeem frames dedupe cross-source (redemption
+                            // id vs the poller; IRC-covered (user, reward)
+                            // skips). Other kinds pass through.
+                            let redeem = &v["payload"]["event"];
+                            let already_delivered = deduper
+                                .lock()
+                                .map(|mut d| {
+                                    if sub_type
+                                        == "channel.channel_points_custom_reward_redemption.add"
+                                    {
+                                        let id = redeem["id"].as_str().unwrap_or_default();
+                                        !d.is_new_redemption_id(id)
+                                            || d.irc_already_rendered(
+                                                redeem["user_login"].as_str().unwrap_or_default(),
+                                                redeem["user_id"].as_str().unwrap_or_default(),
+                                                redeem["reward"]["id"].as_str().unwrap_or_default(),
+                                            )
+                                    } else {
+                                        false
+                                    }
+                                })
+                                .unwrap_or(false);
+                            if !already_delivered {
+                                let _ = tx.send(frame.to_string());
+                            }
                         }
                     }
                     "session_reconnect" => {
@@ -193,6 +320,15 @@ async fn run_session(
                     }
                     _ => {}
                 }
+                    }
+                    other => {
+                        tracing::warn!(
+                            frame = ?other.map(|m| format!("{m:?}")).unwrap_or_default(),
+                            "eventsub socket closed mid-session"
+                        );
+                        return SessionEnd::Dropped;
+                    }
+                }
             }
         }
     }
@@ -201,7 +337,11 @@ async fn run_session(
 /// Map an EventSub notification payload onto the widget's event-frame wire
 /// shape (`{type:"event", event:{kind, ...}}`). Returns None for types the
 /// widget does not render.
-fn map_event(sub_type: &str, ev: &serde_json::Value) -> Option<serde_json::Value> {
+fn map_event(
+    sub_type: &str,
+    ev: &serde_json::Value,
+    coin_icon: &Option<String>,
+) -> Option<serde_json::Value> {
     let kind = match sub_type {
         "channel.channel_points_custom_reward_redemption.add" => "redeem",
         "channel.hype_train.begin" => return hype("begin", ev),
@@ -211,19 +351,26 @@ fn map_event(sub_type: &str, ev: &serde_json::Value) -> Option<serde_json::Value
         "channel.prediction.lock" => return prediction("lock", ev),
         "channel.prediction.end" => return prediction("end", ev),
         "channel.poll.begin" => return poll("begin", ev),
-        "channel.poll.lock" => return poll("lock", ev),
         "channel.poll.end" => return poll("end", ev),
+        "channel.follow" => "follow",
         _ => return None,
     };
 
+    // EventSub carries the reward title AND icon inline — no Helix lookup
+    // needed. Default-icon rewards (image null) fall back to the channel
+    // coin resolved via GQL at session start.
+    let reward_image = ev["reward"]["image"]["url_2x"]
+        .as_str()
+        .map(str::to_string)
+        .or_else(|| coin_icon.clone());
     Some(serde_json::json!({
         "type": "event",
         "event": {
             "kind": kind,
             "user_login": ev["user_login"].as_str().unwrap_or_default(),
             "display_name": ev["user_name"].as_str().unwrap_or_default(),
-            // EventSub carries the reward title inline — no Helix lookup needed.
             "reward_title": ev["reward"]["title"].as_str(),
+            "reward_image": reward_image,
             "user_input": ev["user_input"].as_str().unwrap_or_default(),
         }
     }))

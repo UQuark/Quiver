@@ -28,6 +28,7 @@ pub enum MsgKind {
     HypeTrain,
     Prediction,
     Poll,
+    Follow,
 }
 
 impl MsgKind {
@@ -42,6 +43,7 @@ impl MsgKind {
             "hype_train" => Some(Self::HypeTrain),
             "prediction" => Some(Self::Prediction),
             "poll" => Some(Self::Poll),
+            "follow" => Some(Self::Follow),
             _ => None,
         }
     }
@@ -58,6 +60,7 @@ impl MsgKind {
             Self::HypeTrain => "hype_train",
             Self::Prediction => "prediction",
             Self::Poll => "poll",
+            Self::Follow => "follow",
         }
     }
 }
