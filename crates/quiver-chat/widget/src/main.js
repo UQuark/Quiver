@@ -392,7 +392,18 @@ function chatOverflows() {
   const oldest = chat.querySelector(".msg");
   if (!oldest) return false;
   const containerTop = chat.getBoundingClientRect().top;
-  return oldest.getBoundingClientRect().top < containerTop - 0.5;
+  return visualTop(oldest) < containerTop - 0.5;
+}
+// Highest on-screen point of a message, INCLUDING descendants that stick out
+// above its border box (absolutely positioned name pills, badges, ...).
+function visualTop(msg) {
+  let top = msg.getBoundingClientRect().top;
+  for (const el of msg.querySelectorAll("*")) {
+    const r = el.getBoundingClientRect();
+    if (r.width === 0 && r.height === 0) continue; // display:none / empty
+    if (r.top < top) top = r.top;
+  }
+  return top;
 }
 
 // Drop the oldest RENDERED message from the DOM, leaving `history` alone.
