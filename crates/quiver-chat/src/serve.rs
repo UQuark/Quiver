@@ -456,6 +456,10 @@ let css_cache_dir = cfg
         channel_changed: swap_tx,
     };
     crate::reload::spawn_watcher(config_path, ctx, quit.clone());
+    // refresh_interval_secs: conditional-GET revalidation of the custom
+    // badge cache. Without this the interval was dead config — resolve_full
+    // only ran at boot and on config edits.
+    crate::reload::spawn_badge_refresh(live.clone(), custom_badges.clone(), quit.clone());
 
     loop {
         let addr = live.read().unwrap().listen.clone();
